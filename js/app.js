@@ -721,8 +721,10 @@ var App = (function () {
     var rrbRows = Rules.RRB.map(function (x) {
       var hit = x.reqs.filter(function (id) { return !!reqById(id); });
       return '<tr><td>' + esc(x.name) + (x.v1 ? ' <span class="pill blue">第一版涉及</span>' : '') + '</td><td>' +
-        (hit.length ? '<span class="pill teal">AI 有找到</span>' : '<span class="pill fail">AI 沒找到</span>') + '</td></tr>';
+        (hit.length ? '<span class="pill teal">AI 有找到</span>' : '<span class="pill fail">AI 沒找到</span>') + '</td><td class="small">' +
+        (x.ref ? '<span class="pill teal">有</span> ' + esc(x.ref) : '<span class="pill">沒看到</span>') + '</td></tr>';
     }).join('');
+    var refSeen = Rules.RRB.filter(function (x) { return !!x.ref; }).length;
 
     return head('7　驗收測試', '按一下按鈕，系統會自動做 ' + Tests.cases.length + ' 項檢查，看 ERP 有沒有照規則運作。',
         '<button type="button" class="btn primary big" data-act="run-tests">執行全部驗收測試</button>') +
@@ -741,7 +743,8 @@ var App = (function () {
           : '<p class="muted">還沒有需求。請先完成「AI 問答」。</p>') +
       '</section>' +
       details('研究用：參考需求基準（RRB）七項，AI 找到幾項',
-        '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>參考需求</th><th>AI 是否找到</th></tr></thead><tbody>' + rrbRows + '</tbody></table></div>' +
+        '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>參考需求</th><th>AI 是否找到</th><th>參考 ERP（旺盛輪業）有沒有</th></tr></thead><tbody>' + rrbRows + '</tbody></table></div>' +
+        '<p class="hint">七項參考需求裡，有 ' + refSeen + ' 項在這套真實運作的輪胎 ERP 也看得到，可以當作「這些需求不是憑空想像」的佐證。參考 ERP 只做唯讀觀察，沒有改動它的任何資料。</p>' +
         '<p class="hint">隱含需求召回率 ＝ AI 正確找出的隱含需求數 ÷ 參考基準中的隱含需求總數。參考基準要經「整理候選 → 獨立分類 → 專家確認 → 記錄爭議 → 凍結 v1.0 → 正式測試」六步才算數，目前只是示意。</p>');
   }
 

@@ -21,8 +21,8 @@ var Store = (function () {
   }
 
   // ---------- 舊資料升級 ----------
-  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）
-  var DATA_VERSION = 2;
+  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）；3：加入參考 ERP 案例的候選需求
+  var DATA_VERSION = 4;
 
   function prodOf(s, sku) { return s.products.filter(function (p) { return p.sku === sku; })[0]; }
 
@@ -39,6 +39,43 @@ var Store = (function () {
   function migrate(s) {
     var v = (s.meta && s.meta.data_version) || 1;
     if (v >= DATA_VERSION) return s;
+    if (v < 2) migrateToV2(s);
+    if (v < 3) migrateToV3(s);
+    if (v < 4) migrateToV4(s);
+    s.meta.data_version = DATA_VERSION;
+    return s;
+  }
+
+  // v4：寄庫決定採用「購買當下就扣庫存」。沒被人改過的需求文字、規則用新版更新，並拿掉已經決定的舊疑問
+  function migrateToV4(s) {
+    s.wb.requirements.forEach(function (r) {
+      var c = Rules.REQ_CATALOG[r.id];
+      if (!c || r.edited) return;
+      r.text = c.text; r.priority = c.priority; r.quality = c.quality.slice();
+      if (!r.note && c.decision) r.note = c.decision;
+    });
+    s.wb.rules = s.wb.rules.map(function (r) {
+      var t = r.edited_at ? null : Rules.RULE_TEMPLATES.filter(function (x) { return x.id === r.id; })[0];
+      return t ? fromTemplate(t, r) : r;
+    });
+    s.wb.interview.questions = s.wb.interview.questions.filter(function (q) { return q.text.indexOf('寄庫的輪胎，購買當下') < 0; });
+  }
+
+  // v3：問答已完成的專案，補上「參考 ERP 案例」的候選需求（AI 建議，不影響已做的決定）
+  function migrateToV3(s) {
+    if (s.wb.interview.step < Rules.DONE_STEP) return;
+    Rules.REF_CANDIDATES.forEach(function (id) {
+      if (s.wb.requirements.some(function (r) { return r.id === id; })) return;
+      var c = Rules.REQ_CATALOG[id];
+      s.wb.requirements.push({
+        id: id, text: c.text, priority: c.priority, quality: c.quality.slice(), group: '',
+        status: 'ai', source: Rules.REF_SOURCE, evidence: Rules.REF_EVIDENCE[id], note: '', edited: false,
+        history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充（參考 ERP 案例）' }]
+      });
+    });
+  }
+
+  function migrateToV2(s) {
     var sum = {};
     s.orders.forEach(function (o) {
       if (o.status !== 'APPROVED') return;
@@ -85,8 +122,6 @@ var Store = (function () {
         history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充' }]
       });
     }
-    s.meta.data_version = DATA_VERSION;
-    return s;
   }
 
   function load() {
@@ -189,7 +224,7 @@ var Store = (function () {
       s.wb.requirements.push({
         id: a.id, text: cat.text, priority: cat.priority, quality: cat.quality.slice(),
         group: cat.group || '', status: a.status, source: a.source, evidence: a.evidence,
-        note: a.note || '', edited: false,
+        note: a.note || cat.decision || '', edited: false,
         history: [{ at: now(), by: 'AI', to: a.status, note: '訪談產生草稿' }]
       });
     });

@@ -9,7 +9,7 @@ var SEED = {
     schema: 'aiwb_state_v01',
     app: 'AI 可驗證開發工作台',
     version: 'v0.1.0',
-    data_version: 2, // 2：送出即預留（舊資料載入時由 Store 自動升級）
+    data_version: 4, // 4：送出即預留＋參考 ERP 候選需求＋寄庫採購買當下就扣庫存（舊資料載入時由 Store 自動升級）
     build: '2026-10-13.7' // 程式版本標記：畫面左下角會顯示，用來確認瀏覽器載入的是最新檔案
   },
 

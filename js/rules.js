@@ -136,12 +136,39 @@ var Rules = (function () {
     'REQ-008': { text: '已核准訂單取消時釋放預留', priority: 'Should', quality: [2, 1, 2, 1, 1, 1, 1] },
     'REQ-009': { text: '一鍵複製庫存資訊回覆 LINE', priority: 'Should', quality: [2, 2, 1, 1, 1, 2, 1] },
     'REQ-010': { text: '老闆可核准或拒絕待審核叫貨單；拒絕時釋放預留', priority: 'Must', quality: [2, 2, 2, 1, 1, 2, 1] },
-    'REQ-011': { text: '寄庫：一次買 10 條，分次叫貨，正式庫存不變', priority: 'Should', quality: [2, 2, 1, 1, 1, 2, 1] },
+    'REQ-011': {
+      text: '寄庫：客戶買 10 條、當次只取 4 條，其餘 6 條寄放店裡；購買當下就從庫存扣掉全部 10 條，之後取貨不再扣庫存',
+      priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2],
+      decision: '已決定（2026-10-13）：採用旺盛輪業的做法，購買當下就從庫存扣掉'
+    },
     'REQ-012': { text: '依生產日期碼顯示庫齡顏色（1 年內／1–2 年／2–3 年）', priority: 'Should', quality: [2, 2, 2, 2, 1, 1, 1] },
     'REQ-013': { text: '下班後業務仍可送出叫貨單，隔日由老闆審核', priority: 'Should', quality: [2, 2, 1, 1, 1, 2, 1] },
-    'REQ-015': { text: '行動條碼掃描出貨', priority: "Won't", quality: [2, 1, 1, 1, 1, 2, 1] }
+    'REQ-015': { text: '行動條碼掃描出貨', priority: "Won't", quality: [2, 1, 1, 1, 1, 2, 1] },
+    // 參考 ERP 案例（旺盛輪業庫存管理系統）觀察到、本系統第一版還沒做的功能 → 只當「AI 建議」候選，由人決定
+    'REQ-016': { text: '庫存依生產週碼批次分開記錄，並顯示庫齡', priority: 'Should', quality: [2, 2, 1, 2, 1, 1, 2] },
+    'REQ-017': { text: '訂單每個品項分開記錄：訂購數、當次出貨數、客戶寄庫數', priority: 'Should', quality: [2, 2, 1, 2, 1, 2, 2] },
+    'REQ-018': { text: '已出貨的訂單可取消出貨，庫存依原批次復原', priority: 'Should', quality: [2, 2, 2, 1, 1, 1, 2] },
+    'REQ-019': { text: '進貨入庫：選商品、倉別、生產週碼與數量，並留下進貨單號', priority: 'Should', quality: [2, 2, 1, 2, 1, 1, 2] },
+    'REQ-020': { text: '庫存校正：以實際盤點數為準，留下校正紀錄，可取消並回復', priority: 'Should', quality: [2, 2, 1, 2, 1, 1, 2] },
+    'REQ-021': { text: '可新增倉別，並在倉庫之間移動可用庫存（預留與寄庫的不可移）', priority: 'Should', quality: [2, 2, 1, 2, 2, 1, 2] },
+    'REQ-022': { text: '實際售價預設為牌價打 9 折，業務可依該筆交易修改', priority: 'Should', quality: [2, 2, 2, 2, 1, 1, 2] },
+    'REQ-023': { text: 'Excel 批次更新與備份還原：更新前先比對差異', priority: "Won't", quality: [2, 2, 1, 1, 2, 1, 2] }
   };
   var REQ_ORDER = Object.keys(REQ_CATALOG);
+
+  // 參考 ERP 案例的觀察依據（沒有使用者原話；畫面「看依據」會顯示這段）
+  var REF_SOURCE = 'AI 參考 ERP 案例（旺盛輪業）';
+  var REF_EVIDENCE = {
+    'REQ-016': '旺盛輪業 ERP「庫存查詢」：每筆庫存顯示 倉別｜批次碼｜條數｜庫齡，算不出來時寫「無法計算庫齡」。',
+    'REQ-017': '旺盛輪業 ERP「訂單管理」：每個品項顯示「訂購 N 條｜當次出貨 M 條｜客戶寄庫 K 條」，例如訂購 20、當次出貨 11、客戶寄庫 9。',
+    'REQ-018': '旺盛輪業 ERP「訂單管理」：已完成的訂單有「取消出貨並退回庫存」按鈕，庫存依原批次復原。',
+    'REQ-019': '旺盛輪業 ERP「進貨管理」：選商品、入庫倉別、生產日期碼／批次與進貨數量，完成後留下進貨單號。',
+    'REQ-020': '旺盛輪業 ERP「庫存校正」：以管理員輸入的實際盤點數為準，列出校正前後差額與原因，並可「取消並回復」。',
+    'REQ-021': '旺盛輪業 ERP「儲位管理」「輪胎移庫」：有台北倉、五股倉等多個倉別；移庫只移動可用庫存，預留與寄庫保留數量不會被調動。',
+    'REQ-022': '旺盛輪業 ERP「叫貨購物車」：實際售價預設帶入牌價扣 10%，員工與管理員都可依本次交易修改。',
+    'REQ-023': '旺盛輪業 ERP「資料匯入」「備份」：Excel 批次更新前先比對差異、商品 ID／批次 ID／已預留數量不可改；備份可還原。'
+  };
+  var REF_CANDIDATES = Object.keys(REF_EVIDENCE);
   function qualityScore(q) { return (q || []).reduce(function (a, b) { return a + b; }, 0); }
 
   // =====================================================================
@@ -259,8 +286,12 @@ var Rules = (function () {
       note: 'AI 草稿：缺「不成立時要做什麼」和「驗收案例」，所以被閘門擋下，不會進入開發。'
     }),
     tpl({
-      id: 'RULE-009', title: '寄庫分次叫貨', primary: 'REQ-011', reqs: ['REQ-011'], difficulty: '例外交易（部分出貨、寄庫）',
-      if: '客戶寄庫的剩餘數量 ≥ 這次要取的數量', note: 'AI 草稿：只寫了條件，其餘要由人補齊'
+      id: 'RULE-009', title: '寄庫：購買當下就扣庫存，之後分次取貨', primary: 'REQ-011', reqs: ['REQ-011', 'REQ-017'], difficulty: '例外交易（部分出貨、寄庫）',
+      if: '訂購數 ＞ 當次出貨數（多出來的條數要寄放在店裡）',
+      t: { action: '全部訂購數都從庫存扣掉；當次出貨的條數交給客戶，其餘登記為「客戶寄庫」', effect: '庫存減少「訂購數」；這位客戶的寄庫餘額增加「訂購數 − 當次出貨數」', message: '已完成：當次出貨 M 條，寄庫 K 條', audit: '記下訂購、當次出貨、寄庫各多少條', tests: [], final: '訂單已完成；客戶寄庫餘額增加' },
+      f: { action: '不產生寄庫，照一般訂單處理（全部當次出貨）', effect: '庫存減少「訂購數」；寄庫餘額不變', message: '已完成：全部當次出貨', audit: '記下訂購與當次出貨條數', tests: [], final: '訂單已完成；寄庫餘額不變' },
+      edge: { text: '客戶之後來取寄庫：只扣寄庫餘額，不再扣庫存；同一客戶每次申請最多合併 5 項', tests: [] },
+      note: '已決定採用旺盛輪業的做法（購買當下就扣庫存），規則內容已依此寫好；但還沒有驗收案例，所以先不能開發。'
     }),
     tpl({
       id: 'RULE-015', title: '一鍵複製庫存回覆 LINE', primary: 'REQ-009', reqs: ['REQ-009'], difficulty: '權限與敏感資料',
@@ -273,6 +304,39 @@ var Rules = (function () {
     tpl({
       id: 'RULE-017', title: '下班後也能叫貨', primary: 'REQ-013', reqs: ['REQ-013'], difficulty: '單據狀態與回滾',
       if: '送出的時間在營業時間之外', note: 'AI 草稿：只寫了條件，其餘要由人補齊'
+    }),
+    // ---- 參考 ERP 案例的候選規則（只寫了條件，示範「寫不完整就不能開發」）----
+    tpl({
+      id: 'RULE-018', title: '依批次扣庫存', primary: 'REQ-016', reqs: ['REQ-016'], difficulty: '庫存時間差、超賣',
+      if: '要出貨的批次，可用數量 ≥ 要出的數量', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+    }),
+    tpl({
+      id: 'RULE-019', title: '訂單明細：訂購數 ＝ 當次出貨 ＋ 客戶寄庫', primary: 'REQ-017', reqs: ['REQ-017'], difficulty: '例外交易（部分出貨、寄庫）',
+      if: '每個品項：當次出貨數 ＋ 客戶寄庫數 ＝ 訂購數', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+    }),
+    tpl({
+      id: 'RULE-020', title: '取消出貨並依原批次復原庫存', primary: 'REQ-018', reqs: ['REQ-018'], difficulty: '單據狀態與回滾',
+      if: '訂單目前是「已出貨」', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+    }),
+    tpl({
+      id: 'RULE-021', title: '進貨入庫', primary: 'REQ-019', reqs: ['REQ-019'], difficulty: '盤點與校正',
+      if: '進貨數量是正整數，且已選好倉別與生產週碼', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+    }),
+    tpl({
+      id: 'RULE-022', title: '庫存校正（以實際盤點為準）', primary: 'REQ-020', reqs: ['REQ-020'], difficulty: '盤點與校正',
+      if: '管理員輸入的實際盤點數是 0 或更大的整數', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+    }),
+    tpl({
+      id: 'RULE-023', title: '倉庫之間移庫', primary: 'REQ-021', reqs: ['REQ-021'], difficulty: '庫存時間差、超賣',
+      if: '移庫數量 ≤ 來源批次的可用數量（不含預留與寄庫）', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+    }),
+    tpl({
+      id: 'RULE-024', title: '實際售價預設 9 折，可修改', primary: 'REQ-022', reqs: ['REQ-022'], difficulty: '金額計算',
+      if: '業務輸入的實際售價是大於 0 的數字', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+    }),
+    tpl({
+      id: 'RULE-025', title: 'Excel 匯入前先比對差異', primary: 'REQ-023', reqs: ['REQ-023'], difficulty: '舊資料匯入',
+      if: '匯入的 Excel 與目前資料相比，沒有「不可修改的欄位」被改動', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
     })
   ];
 
@@ -284,9 +348,9 @@ var Rules = (function () {
     { name: '權限與敏感資料', rule: 'RULE-001', v1: '做', ask: '哪些角色可以看到成本、毛利？' },
     { name: '單據狀態與回滾', rule: 'RULE-005／008', v1: '部分', ask: '送出後能不能改？退回、取消時庫存怎麼回復？' },
     { name: '例外交易（部分出貨、寄庫）', rule: 'RULE-009', v1: '候選', ask: '客戶會一次買多條、分次取貨嗎？' },
-    { name: '盤點與校正', rule: 'RULE-010', v1: '候選', ask: '盤點差異由誰調整？要不要留紀錄？' },
-    { name: '金額計算', rule: 'RULE-011', v1: '候選', ask: '折扣、稅、四捨五入在哪一步算？' },
-    { name: '舊資料匯入', rule: 'RULE-012', v1: '候選', ask: '現有 Excel 庫存怎麼匯入？錯誤資料怎麼處理？' },
+    { name: '盤點與校正', rule: 'RULE-022', v1: '候選', ask: '盤點差異由誰調整？要不要留紀錄？' },
+    { name: '金額計算', rule: 'RULE-024', v1: '候選', ask: '折扣、稅、四捨五入在哪一步算？' },
+    { name: '舊資料匯入', rule: 'RULE-025', v1: '候選', ask: '現有 Excel 庫存怎麼匯入？錯誤資料怎麼處理？' },
     { name: '與舊系統並存', rule: 'RULE-013', v1: '候選', ask: '上線期間舊系統還用嗎？以哪邊為準？' },
     { name: '報表口徑', rule: 'RULE-014', v1: '候選', ask: '「庫存」報表算在庫還是可用？' }
   ];
@@ -305,14 +369,15 @@ var Rules = (function () {
   ];
 
   // 參考需求基準 RRB（凍結前為示意）；AI 找到 = 訪談中出現對應需求（不論人是否採納）
+  // ref：參考 ERP 案例（旺盛輪業）有沒有看到對應功能（2026-10-13 唯讀瀏覽；空字串＝沒看到）
   var RRB = [
-    { name: '預留與可用庫存', reqs: ['REQ-004', 'REQ-004B', 'REQ-005'], v1: true },
-    { name: '成本權限', reqs: ['REQ-006'], v1: true },
-    { name: '複製回覆 LINE', reqs: ['REQ-009'], v1: false },
-    { name: '叫貨審核', reqs: ['REQ-002', 'REQ-007', 'REQ-010'], v1: true },
-    { name: '寄庫', reqs: ['REQ-011'], v1: false },
-    { name: '庫齡', reqs: ['REQ-012'], v1: false },
-    { name: '下班可叫貨', reqs: ['REQ-013'], v1: false }
+    { name: '預留與可用庫存', reqs: ['REQ-004', 'REQ-004B', 'REQ-005'], v1: true, ref: '庫存卡有「預留」「寄庫」「可叫貨」欄位（預留何時建立未驗證）' },
+    { name: '成本權限', reqs: ['REQ-006'], v1: true, ref: '' },
+    { name: '複製回覆 LINE', reqs: ['REQ-009'], v1: false, ref: '庫存卡有「複製」按鈕' },
+    { name: '叫貨審核', reqs: ['REQ-002', 'REQ-007', 'REQ-010'], v1: true, ref: '訂單有待審核、已完成、已退回、已取消' },
+    { name: '寄庫', reqs: ['REQ-011'], v1: false, ref: '有「客戶寄庫」頁與寄庫出貨申請' },
+    { name: '庫齡', reqs: ['REQ-012'], v1: false, ref: '每個批次顯示庫齡' },
+    { name: '下班可叫貨', reqs: ['REQ-013'], v1: false, ref: '' }
   ];
 
   // =====================================================================
@@ -436,12 +501,15 @@ var Rules = (function () {
         add('REQ-012', 'ai', '', 'AI 角色推演（財務）', inferred);
         add('REQ-013', 'ai', '', 'AI 參考模型', inferred);
         add('REQ-015', 'ai', '', 'AI 參考模型', inferred);
+        REF_CANDIDATES.forEach(function (id) { add(id, 'ai', '', REF_SOURCE, REF_EVIDENCE[id]); });
         var early = wb.requirements.some(function (r) { return r.id === 'REQ-004B' && r.status === 'pending'; });
         qs.push('老闆退回或拒絕時，預留要不要釋放？' + (early ? '（送出就預留 → AI 建議：要釋放，否則庫存會被卡住）' : '（核准才預留 → 退回時還沒預留，AI 建議：不用釋放）'));
         qs.push('低庫存是「小於」還是「小於或等於」安全庫存？');
         qs.push(early ? '兩位業務同時送出同一批最後庫存怎麼辦？（AI 建議：送出時重新查庫存，只讓 1 人成功）' : '兩位老闆同時核准同一批最後庫存怎麼辦？（AI 建議：核准時重新查庫存，只讓 1 張成功）');
+        qs.push('庫存要不要分「生產週碼批次」記錄？（參考 ERP：每筆庫存都分批次，才算得出庫齡，取消出貨時也才能還原到原批次）');
+        qs.push('核准之後，還要不要有「出貨」這一步來真正扣掉在庫？（參考 ERP：出貨完成時才扣，並且可以取消出貨）');
         var total = wb.requirements.length + adds.length;
-        ai = '整理完成，目前共 **' + total + ' 條需求草稿**。我另外依「ERP 難點檢核清單」想到幾項您沒有提到、但同類 ERP 常見的需求（標示「AI 建議」），例如：已核准訂單取消時釋放預留、下班後可叫貨、行動條碼掃描出貨。\n**AI 只能提議，不能把需求改成「已確認」**，請到「確認需求」逐條決定。';
+        ai = '整理完成，目前共 **' + total + ' 條需求草稿**。我另外依「ERP 難點檢核清單」，以及一套真實運作中的輪胎 ERP（旺盛輪業）的功能，想到幾項您沒有提到的需求（標示「AI 建議」），例如：已核准訂單取消時釋放預留、庫存分批次與庫齡、客戶寄庫、進貨與庫存校正。\n**AI 只能提議，不能把需求改成「已確認」**，請到「確認需求」逐條決定。';
         break;
       default:
         ai = '已記錄補充說明' + (adds.length ? '，並新增 ' + adds.map(function (a) { return a.id; }).join('、') : '') + '。訪談已完成，請到「確認需求」處理需求。';
@@ -624,6 +692,7 @@ var Rules = (function () {
     RESERVING: RESERVING, canReturn: canReturn, canApprove: canApprove, canReject: canReject, canEdit: canEdit,
     CLOSURE: CLOSURE, check: check, testIds: testIds, parseTestIds: parseTestIds,
     QUALITY: QUALITY, REQ_CATALOG: REQ_CATALOG, REQ_ORDER: REQ_ORDER, qualityScore: qualityScore,
+    REF_SOURCE: REF_SOURCE, REF_EVIDENCE: REF_EVIDENCE, REF_CANDIDATES: REF_CANDIDATES,
     RULE_TEMPLATES: RULE_TEMPLATES, DIFFICULTIES: DIFFICULTIES, STATE_MACHINE: STATE_MACHINE, RRB: RRB,
     DONE_STEP: DONE_STEP, DEFAULT_NEED: DEFAULT_NEED,
     interviewChips: interviewChips, interviewRespond: interviewRespond, buildBlockers: buildBlockers, buildBlockerItems: buildBlockerItems,

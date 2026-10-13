@@ -21,6 +21,8 @@ Coding Agent＝開發引擎。以輪胎批發 ERP 做垂直切片：查庫存→
 - RULE-005 只有 SUBMITTED 可退回；退回時釋放預留（reserved −= qty）。
 - RULE-006 老闆核准只改狀態（SUBMITTED → APPROVED），庫存不變。
 - RULE-007 老闆拒絕 SUBMITTED 訂單 → REJECTED，釋放預留。
+- 寄庫（REQ-011，候選、尚未實作）：採旺盛輪業的做法（2026-10-13 使用者決定）——購買當下就從庫存扣掉全部訂購數，
+  當次只出貨一部分，其餘登記為客戶寄庫；之後客戶取貨只扣寄庫餘額，不再扣庫存。訂單明細要分開記錄：訂購數＝當次出貨數＋客戶寄庫數。
 - 不變式：每個品項 reserved ＝ 所有 SUBMITTED 與 APPROVED 訂單該品項數量合計，且 0 ≤ reserved ≤ on_hand。
 - 每條規則必須有：IF、True、False、資料效果、訊息、稽核、≥2 測試、最終狀態（8 項），缺一不可進入開發。
 
