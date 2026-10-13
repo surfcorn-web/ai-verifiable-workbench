@@ -774,10 +774,12 @@ var App = (function () {
       var ready = function (x) { return x ? x.rules.filter(function (r) { return r.complete; }).map(function (r) { return r.id; }) : []; };
       var diff = [];
       if (prev) {
-        conf(v).filter(function (id) { return conf(prev).indexOf(id) < 0; }).forEach(function (id) { diff.push('新增需求 ' + id); });
-        conf(prev).filter(function (id) { return conf(v).indexOf(id) < 0; }).forEach(function (id) { diff.push('移除需求 ' + id); });
-        ready(v).filter(function (id) { return ready(prev).indexOf(id) < 0; }).forEach(function (id) { diff.push('新增規則 ' + id); });
-        ready(prev).filter(function (id) { return ready(v).indexOf(id) < 0; }).forEach(function (id) { diff.push('移除規則 ' + id); });
+        var reqName = function (x, id) { var q = x.reqs.filter(function (z) { return z.id === id; })[0]; return q ? short(q.text, 30) : id; };
+        var ruleName = function (x, id) { var q = x.rules.filter(function (z) { return z.id === id; })[0]; return q ? q.title : id; };
+        conf(v).filter(function (id) { return conf(prev).indexOf(id) < 0; }).forEach(function (id) { diff.push('多了已確認的需求：' + reqName(v, id)); });
+        conf(prev).filter(function (id) { return conf(v).indexOf(id) < 0; }).forEach(function (id) { diff.push('少了已確認的需求：' + reqName(prev, id)); });
+        ready(v).filter(function (id) { return ready(prev).indexOf(id) < 0; }).forEach(function (id) { diff.push('規則寫完整了：' + ruleName(v, id)); });
+        ready(prev).filter(function (id) { return ready(v).indexOf(id) < 0; }).forEach(function (id) { diff.push('規則變得不完整：' + ruleName(prev, id)); });
         var tp = v.tests ? v.tests.pass : 0, pp = prev.tests ? prev.tests.pass : 0;
         if (tp !== pp) diff.push('通過的驗收 ' + pp + ' → ' + tp);
       }
@@ -785,7 +787,7 @@ var App = (function () {
       return '<tr><td class="mono"><b>' + esc(v.id) + '</b></td><td class="nowrap">' + fmtTime(v.at) + '</td><td>' + esc(v.note || '—') + '</td>' +
         '<td class="num">' + conf(v).length + '</td><td class="num">' + ready(v).length + '／' + v.rules.length + '</td>' +
         '<td>' + (v.tests ? '<span class="res ' + (v.tests.pass === v.tests.total ? 'pass' : 'fail') + '">' + v.tests.pass + '／' + v.tests.total + '</span>' : '<span class="muted">未測</span>') + '</td>' +
-        '<td class="num">' + ck + '／9</td><td class="small">' + (prev ? (diff.length ? esc(diff.join('、')) : '沒有變動') : '第一版') + '</td></tr>';
+        '<td class="num">' + ck + '／9</td><td class="small">' + (prev ? (diff.length ? diff.map(function (d) { return '<div>' + esc(d) + '</div>'; }).join('') : '沒有變動') : '第一版') + '</td></tr>';
     }).join('');
 
     var logs = db.wb.log.slice(-12).reverse().map(function (l) {
