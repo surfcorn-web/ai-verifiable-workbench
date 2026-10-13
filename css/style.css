@@ -371,3 +371,4 @@ pre.code { background: #0f1b2d; color: #dbe7f6; padding: 16px; border-radius: 0 
   .msg { max-width: 94%; }
   .next-bar { flex-wrap: wrap; }
 }
+.demo-note { margin-bottom: 14px; }

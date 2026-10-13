@@ -312,6 +312,7 @@ var App = (function () {
         (ui.chatMore ? '' : '<p class="hint center"><button type="button" class="link" data-act="chat-more">還有想補充的？</button></p>') : '';
     return head('2　AI 問答', done ? 'AI 已經問完了。<b>請看右邊 AI 整理的需求，再到「確認需求」逐條決定。</b>' : 'AI 會一步步問你問題，你照實回答就好。<b>不知道怎麼答，點下面的「建議回答」就能送出。</b>',
         '<button type="button" class="btn ghost sm" data-act="restart-interview">重新問答</button>') +
+      '<div class="note orange demo-note"><b>先說清楚：這是示範版。</b>下面 AI 問的問題，是事先照「ERP 常見難點清單」寫好的，<b>不是真的 AI 在思考，也不會連網</b>。這裡要示範的是流程：問清楚 → 由你確認 → 規則寫完整才能開發。真正的 AI 工程師（Codex／Claude）是在「開發包」交給它之後才出現。</div>' +
       '<div class="progress' + (done ? ' done' : '') + '"><div class="bar" style="width:' + pct + '%"></div><span>' + (done ? '✔ 問答完成，下一步：確認需求' : '第 ' + (it.step + 1) + ' 輪，共 ' + Rules.DONE_STEP + ' 輪') + '</span></div>' +
       '<div class="interview">' +
         '<section class="card chat">' +
@@ -320,7 +321,7 @@ var App = (function () {
               '<div class="chat-empty"><b>AI：</b>您好！請用一句話說說您想解決什麼問題，我會一步步追問細節。</div>') +
           '</div>' +
           doneBox + (showInput ? inputHtml : '') +
-          '<p class="hint">這是示範版：AI 的追問是照「ERP 常見難點清單」寫好的，不會連網。AI 只會整理出需求草稿，要不要採用由你決定。</p>' +
+          '<p class="hint">AI 只會整理出需求草稿，要不要採用由你決定。</p>' +
         '</section>' +
         '<aside class="card">' +
           '<h2>AI 整理出的需求（草稿）</h2>' +
