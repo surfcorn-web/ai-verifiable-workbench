@@ -1,13 +1,16 @@
 /* data.js — SEED：系統初始資料（「重設資料」會回到這裡）
  * 全域物件：SEED
- * 庫存規則：available = on_hand − reserved；reserved 只在老闆「核准時」增加（REQ-004）。
- * 種子資料的不變式：每個品項 reserved = 所有 APPROVED 訂單該品項數量合計。
+ * 庫存規則：available = on_hand − reserved；reserved 在業務「送出時」增加（REQ-004B 送出即預留），
+ * 退回、拒絕時釋放，核准不再改庫存。
+ * 種子資料的不變式：每個品項 reserved = 所有 SUBMITTED 與 APPROVED 訂單該品項數量合計。
  */
 var SEED = {
   meta: {
     schema: 'aiwb_state_v01',
     app: 'AI 可驗證開發工作台',
-    version: 'v0.1.0'
+    version: 'v0.1.0',
+    data_version: 2, // 2：送出即預留（舊資料載入時由 Store 自動升級）
+    build: '2026-10-13.7' // 程式版本標記：畫面左下角會顯示，用來確認瀏覽器載入的是最新檔案
   },
 
   // ---------- ERP：輪胎批發 ----------
@@ -21,7 +24,7 @@ var SEED = {
   products: [
     { sku: 'TR-001', brand: '米其林 Michelin', name: 'Primacy 4', spec: '205/55R16', year: 2025, on_hand: 130, reserved: 6, cost: 2650, price: 3300 },
     { sku: 'TR-002', brand: '普利司通 Bridgestone', name: 'Turanza T005', spec: '225/45R17', year: 2024, on_hand: 3, reserved: 2, cost: 3150, price: 3950 },
-    { sku: 'TR-003', brand: '馬牌 Continental', name: 'UltraContact UC7', spec: '215/55R17', year: 2025, on_hand: 48, reserved: 0, cost: 2900, price: 3600 },
+    { sku: 'TR-003', brand: '馬牌 Continental', name: 'UltraContact UC7', spec: '215/55R17', year: 2025, on_hand: 48, reserved: 8, cost: 2900, price: 3600 },
     { sku: 'TR-004', brand: '橫濱 Yokohama', name: 'BluEarth-GT AE51', spec: '195/65R15', year: 2023, on_hand: 60, reserved: 12, cost: 1850, price: 2300 },
     { sku: 'TR-005', brand: '瑪吉斯 Maxxis', name: 'Victra Sport 5', spec: '235/45R18', year: 2025, on_hand: 20, reserved: 20, cost: 2700, price: 3400 },
     { sku: 'TR-006', brand: '固特異 Goodyear', name: 'EfficientGrip Performance 2', spec: '205/60R16', year: 2024, on_hand: 36, reserved: 4, cost: 2350, price: 2900 },

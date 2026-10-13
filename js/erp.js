@@ -1,5 +1,7 @@
-/* erp.js — 輪胎批發 ERP 垂直切片：查庫存 → 叫貨 → 送出 → 老闆核准 → 建立預留 → 更新可用庫存
+/* erp.js — 輪胎批發 ERP 垂直切片：查庫存 → 叫貨 → 送出（建立預留、更新可用庫存）→ 老闆核准
  * 全域物件：ERP
+ * 預留規則（REQ-004B 送出即預留）：
+ *   送出時重新讀取庫存，足夠才預留（reserved += qty）；退回、老闆拒絕時釋放（reserved −= qty）；核准只改狀態。
  * 寫法約定：
  * - 第一個參數為 db；函式內先 clone，不改動傳入的 db。
  * - 回傳 { ok, message, state, data }；state 是新的完整資料（失敗時也帶回，內含稽核紀錄）。
@@ -44,6 +46,38 @@ var ERP = (function () {
     return result(false, message, s);
   }
 
+  // 一張訂單每個品項要用的數量（同品項合併）
+  function need(o) {
+    var n = {};
+    o.lines.forEach(function (l) { n[l.sku] = (n[l.sku] || 0) + l.qty; });
+    return n;
+  }
+
+  // 此刻每個品項的可用庫存是否足夠（送出時重新讀取）
+  function checkStock(s, o) {
+    var n = need(o);
+    return Object.keys(n).map(function (sku) {
+      var p = findProduct(s, sku);
+      var avail = p ? Rules.available(p) : 0;
+      return { sku: sku, spec: p ? p.spec : sku, label: label(p), need: n[sku], available: avail, enough: !!p && avail >= n[sku] };
+    });
+  }
+
+  // 釋放這張單預留的數量（退回、拒絕）
+  function release(s, o) {
+    var n = need(o);
+    return Object.keys(n).map(function (sku) {
+      var p = findProduct(s, sku);
+      var before = Rules.available(p);
+      p.reserved -= n[sku];
+      return { sku: sku, spec: p.spec, qty: n[sku], before: before, after: Rules.available(p) };
+    });
+  }
+
+  function changeText(rows) {
+    return rows.map(function (c) { return c.spec + ' 可用 ' + c.before + ' → ' + c.after; }).join('；');
+  }
+
   // ---------------------------------------------------------------------
   // RULE-001 查庫存：業務的結果物件不含 cost
   // ---------------------------------------------------------------------
@@ -66,7 +100,7 @@ var ERP = (function () {
   }
 
   // ---------------------------------------------------------------------
-  // RULE-002 叫貨：數量必須為正整數
+  // RULE-002 叫貨：數量必須為正整數（加入購物車不預留，送出才預留）
   // ---------------------------------------------------------------------
   function addLine(db, userId, sku, qty, customer) {
     var s = clone(db);
@@ -92,12 +126,12 @@ var ERP = (function () {
     }
     var line = o.lines.filter(function (l) { return l.sku === sku; })[0];
     if (line) line.qty += n; else o.lines.push({ sku: sku, qty: n });
-    var msg = '已加入叫貨單 ' + o.id + '：' + p.spec + ' × ' + n;
+    var msg = '已加入叫貨單 ' + o.id + '：' + p.spec + ' × ' + n + '（送出後才會預留庫存）';
     audit(s, u, 'ADD_LINE', 'RULE-002', o.id, true, msg, { sku: sku, qty: n });
     return result(true, msg, s, { order_id: o.id });
   }
 
-  function editable(s, u, orderId, action) {
+  function editable(s, u, orderId) {
     var o = findOrder(s, orderId);
     if (!o) return { err: '找不到訂單 ' + orderId };
     if (!u || o.created_by !== u.id) return { err: '只有建立這張叫貨單的業務可以修改' };
@@ -147,74 +181,84 @@ var ERP = (function () {
     return result(true, msg, s);
   }
 
-  // 送出：DRAFT／RETURNED → SUBMITTED；REQ-004 核准才預留，所以送出不動庫存
+  // ---------------------------------------------------------------------
+  // RULE-003 送出即預留：送出當下重新讀取庫存；足夠 → 預留並變成待審核；不足 → 不可送出且資料不變
+  // ---------------------------------------------------------------------
   function submitOrder(db, userId, orderId) {
     var s = clone(db);
     var u = findUser(s, userId);
     var e = editable(s, u, orderId);
     if (e.err) return deny(s, u, 'SUBMIT_DENIED', '', orderId, e.err);
-    if (!e.o.lines.length) return deny(s, u, 'SUBMIT_DENIED', '', orderId, '叫貨單沒有品項，不能送出');
-    var bad = e.o.lines.filter(function (l) { return !Rules.isPositiveInt(l.qty); });
+    var o = e.o;
+    if (!o.lines.length) return deny(s, u, 'SUBMIT_DENIED', '', orderId, '叫貨單沒有品項，不能送出');
+    var bad = o.lines.filter(function (l) { return !Rules.isPositiveInt(l.qty); });
     if (bad.length) return deny(s, u, 'SUBMIT_DENIED', 'RULE-002', orderId, '叫貨數量必須為正整數', { skus: bad.map(function (l) { return l.sku; }) });
-    var from = e.o.status;
-    setStatus(e.o, 'SUBMITTED', u, from === 'RETURNED' ? '修改後重新送出' : '');
-    e.o.submitted_at = now();
-    var msg = e.o.id + (from === 'RETURNED' ? ' 已重新送出' : ' 已送出') + '，等待老闆核准（核准時才預留）';
-    audit(s, u, 'SUBMITTED', 'RULE-002', e.o.id, true, msg, { from: from, lines: clone(e.o.lines) });
-    return result(true, msg, s);
+
+    var checks = checkStock(s, o);
+    var short = checks.filter(function (c) { return !c.enough; });
+    if (short.length) {
+      var why = short.map(function (c) { return c.spec + ' 剩 ' + c.available; }).join('；');
+      return deny(s, u, 'SUBMIT_DENIED', 'RULE-003', o.id, o.id + ' 不能送出：可用庫存不足（' + why + '）', { checks: checks });
+    }
+
+    var rows = checks.map(function (c) {
+      var p = findProduct(s, c.sku);
+      var before = Rules.available(p);
+      p.reserved += c.need;
+      return { sku: c.sku, spec: c.spec, qty: c.need, before: before, after: Rules.available(p) };
+    });
+    var from = o.status;
+    setStatus(o, 'SUBMITTED', u, from === 'RETURNED' ? '修改後重新送出，並重新預留' : '送出並預留');
+    o.submitted_at = now();
+    var msg = o.id + (from === 'RETURNED' ? ' 已重新送出' : ' 已送出') + '並預留（' + changeText(rows) + '），等待老闆核准';
+    audit(s, u, 'SUBMITTED', 'RULE-003', o.id, true, msg, { from: from, reserved: rows });
+    return result(true, msg, s, { reserved: rows });
   }
 
   // ---------------------------------------------------------------------
-  // RULE-004 老闆核准：核准當下重新讀取庫存；不足 → REJECTED 且庫存完全不變
+  // RULE-006 老闆核准：只改狀態，庫存不變（預留在送出時已建立）
   // ---------------------------------------------------------------------
   function approveOrder(db, userId, orderId) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'APPROVE_DENIED', 'RULE-004', orderId, '只有老闆可以核准');
+    if (!Rules.isBoss(u)) return deny(s, u, 'APPROVE_DENIED', 'RULE-006', orderId, '只有老闆可以核准');
     var o = findOrder(s, orderId);
-    if (!o) return deny(s, u, 'APPROVE_DENIED', 'RULE-004', orderId, '找不到訂單 ' + orderId);
+    if (!o) return deny(s, u, 'APPROVE_DENIED', 'RULE-006', orderId, '找不到訂單 ' + orderId);
     if (!Rules.canApprove(o)) {
-      return deny(s, u, 'APPROVE_DENIED', 'RULE-004', o.id, o.id + ' 目前是「' + statusLabel(o.status) + '」，只有待審核訂單可以核准');
+      return deny(s, u, 'APPROVE_DENIED', 'RULE-006', o.id, '只有待審核的訂單可以核准；' + o.id + ' 目前是「' + statusLabel(o.status) + '」');
     }
-
-    // 合併同品項數量後，逐項讀取「此刻」的 on_hand／reserved
-    var need = {};
-    o.lines.forEach(function (l) { need[l.sku] = (need[l.sku] || 0) + l.qty; });
-    var checks = Object.keys(need).map(function (sku) {
-      var p = findProduct(s, sku);
-      var avail = p ? Rules.available(p) : 0;
-      return { sku: sku, label: label(p), need: need[sku], available: avail, enough: !!p && avail >= need[sku] };
-    });
-    var short = checks.filter(function (c) { return !c.enough; });
-
-    if (short.length) {
-      // False 分支：只改訂單狀態並寫稽核，products 一個欄位都不動
-      var why = short.map(function (c) { return c.label.split(' ')[0] + ' 剩 ' + c.available; }).join('；');
-      var msgF = '可用庫存不足（' + why + '）';
-      setStatus(o, 'REJECTED', u, msgF);
-      o.decided_at = now();
-      o.decided_by = u.id;
-      audit(s, u, 'REJECTED', 'RULE-004', o.id, false, o.id + ' ' + msgF, { checks: checks });
-      return result(false, o.id + ' 已拒絕：' + msgF, s, { status: 'REJECTED', checks: checks });
-    }
-
-    // True 分支：建立預留
-    checks.forEach(function (c) {
-      var p = findProduct(s, c.sku);
-      c.before = Rules.available(p);
-      p.reserved += c.need;
-      c.after = Rules.available(p);
-    });
     setStatus(o, 'APPROVED', u, '核准成功');
     o.decided_at = now();
     o.decided_by = u.id;
-    var change = checks.map(function (c) { return c.label.split(' ')[0] + ' 可用 ' + c.before + ' → ' + c.after; }).join('；');
-    audit(s, u, 'APPROVED', 'RULE-004', o.id, true, o.id + ' 核准成功（' + change + '）', { checks: checks });
-    return result(true, o.id + ' 核准成功（' + change + '）', s, { status: 'APPROVED', checks: checks });
+    var msg = o.id + ' 核准成功（預留在送出時就建立了，庫存不變）';
+    audit(s, u, 'APPROVED', 'RULE-006', o.id, true, msg);
+    return result(true, msg, s, { status: 'APPROVED' });
   }
 
   // ---------------------------------------------------------------------
-  // RULE-005 退回：只有 SUBMITTED 可退回
+  // RULE-007 老闆拒絕：待審核 → 已拒絕，並釋放預留
+  // ---------------------------------------------------------------------
+  function rejectOrder(db, userId, orderId, reason) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    if (!Rules.isBoss(u)) return deny(s, u, 'REJECT_DENIED', 'RULE-007', orderId, '只有老闆可以拒絕');
+    var o = findOrder(s, orderId);
+    if (!o) return deny(s, u, 'REJECT_DENIED', 'RULE-007', orderId, '找不到訂單 ' + orderId);
+    if (!Rules.canReject(o)) {
+      return deny(s, u, 'REJECT_DENIED', 'RULE-007', o.id, '只有待審核的訂單可以拒絕；' + o.id + ' 目前是「' + statusLabel(o.status) + '」');
+    }
+    var r = String(reason || '').trim() || '老闆拒絕';
+    var rows = release(s, o);
+    setStatus(o, 'REJECTED', u, r);
+    o.decided_at = now();
+    o.decided_by = u.id;
+    var msg = o.id + ' 已拒絕，預留已釋放（' + changeText(rows) + '）';
+    audit(s, u, 'REJECTED', 'RULE-007', o.id, true, msg, { reason: r, released: rows });
+    return result(true, msg, s, { status: 'REJECTED', released: rows });
+  }
+
+  // ---------------------------------------------------------------------
+  // RULE-005 退回：只有待審核可退回，並釋放預留
   // ---------------------------------------------------------------------
   function returnOrder(db, userId, orderId, reason) {
     var s = clone(db);
@@ -223,14 +267,15 @@ var ERP = (function () {
     var o = findOrder(s, orderId);
     if (!o) return deny(s, u, 'RETURN_DENIED', 'RULE-005', orderId, '找不到訂單 ' + orderId);
     if (!Rules.canReturn(o)) {
-      return deny(s, u, 'RETURN_DENIED', 'RULE-005', o.id, '只有待審核（SUBMITTED）的訂單可以退回；' + o.id + ' 目前是「' + statusLabel(o.status) + '」');
+      return deny(s, u, 'RETURN_DENIED', 'RULE-005', o.id, '只有待審核的訂單可以退回；' + o.id + ' 目前是「' + statusLabel(o.status) + '」');
     }
     var r = String(reason || '').trim() || '請修改後重送';
+    var rows = release(s, o);
     setStatus(o, 'RETURNED', u, r);
     o.return_reason = r;
-    var msg = o.id + ' 已退回，請業務修改後重送（' + r + '）';
-    audit(s, u, 'RETURNED', 'RULE-005', o.id, true, msg, { reason: r });
-    return result(true, msg, s);
+    var msg = o.id + ' 已退回，預留已釋放，請業務修改後重送（' + r + '）';
+    audit(s, u, 'RETURNED', 'RULE-005', o.id, true, msg, { reason: r, released: rows });
+    return result(true, msg, s, { released: rows });
   }
 
   // ---------------------------------------------------------------------
@@ -239,6 +284,8 @@ var ERP = (function () {
   var view = {
     user: function (db, id) { return findUser(db, id); },
     label: function (db, sku) { return label(findProduct(db, sku)); },
+    spec: function (db, sku) { var p = findProduct(db, sku); return p ? p.spec : sku; },
+    availableOf: function (db, sku) { var p = findProduct(db, sku); return p ? Rules.available(p) : 0; },
     draft: function (db, userId) {
       return db.orders.filter(function (o) { return o.created_by === userId && o.status === 'DRAFT'; })[0] || null;
     },
@@ -249,32 +296,26 @@ var ERP = (function () {
         return o.status !== 'DRAFT' && (Rules.isBoss(u) || o.created_by === u.id);
       }).slice().reverse();
     },
-    // 老闆待審核：附上「此刻」每一行的可用量（畫面參考用；真正判斷在 approveOrder 內重新讀取）
+    // 老闆待審核（預留都已建立）
     pending: function (db, userId) {
       if (!Rules.isBoss(findUser(db, userId))) return [];
       return db.orders.filter(function (o) { return o.status === 'SUBMITTED'; }).map(function (o) {
         var c = clone(o);
-        c.lines.forEach(function (l) {
-          var p = findProduct(db, l.sku);
-          l.label = label(p);
-          l.available = p ? Rules.available(p) : 0;
-          l.enough = !!p && l.available >= l.qty;
-        });
-        c.enough = c.lines.every(function (l) { return l.enough; });
+        c.lines.forEach(function (l) { l.label = label(findProduct(db, l.sku)); });
         return c;
       });
     },
-    // 不變式：0 ≤ reserved ≤ on_hand，且 reserved = APPROVED 訂單數量合計
+    // 不變式：0 ≤ reserved ≤ on_hand，且 reserved = 待審核與已核准訂單的數量合計
     invariants: function (db) {
       var sum = {};
       db.orders.forEach(function (o) {
-        if (o.status !== 'APPROVED') return;
+        if (Rules.RESERVING.indexOf(o.status) < 0) return;
         o.lines.forEach(function (l) { sum[l.sku] = (sum[l.sku] || 0) + l.qty; });
       });
       var bad = [];
       db.products.forEach(function (p) {
         if (p.reserved < 0 || p.reserved > p.on_hand) bad.push(p.sku + '：預留 ' + p.reserved + ' 超出在庫 ' + p.on_hand);
-        if ((sum[p.sku] || 0) !== p.reserved) bad.push(p.sku + '：預留 ' + p.reserved + ' ≠ 已核准合計 ' + (sum[p.sku] || 0));
+        if ((sum[p.sku] || 0) !== p.reserved) bad.push(p.sku + '：預留 ' + p.reserved + ' ≠ 待審核與已核准合計 ' + (sum[p.sku] || 0));
       });
       return bad;
     }
@@ -288,6 +329,7 @@ var ERP = (function () {
     setCustomer: setCustomer,
     submitOrder: submitOrder,
     approveOrder: approveOrder,
+    rejectOrder: rejectOrder,
     returnOrder: returnOrder,
     view: view
   };

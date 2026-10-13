@@ -20,12 +20,81 @@ var Store = (function () {
     return !!(s && s.meta && s.meta.schema === KEY && s.products && s.orders && s.wb);
   }
 
+  // ---------- 舊資料升級 ----------
+  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）
+  var DATA_VERSION = 2;
+
+  function prodOf(s, sku) { return s.products.filter(function (p) { return p.sku === sku; })[0]; }
+
+  function fromTemplate(tpl, old) {
+    var rule = clone(tpl);
+    rule.version = old ? old.version : 'v0.1.0';
+    rule.orphan = old ? old.orphan : false;
+    rule.created_at = old ? old.created_at : now();
+    rule.edited_at = old ? old.edited_at : null;
+    return rule;
+  }
+
+  // 預留量一律由訂單重新計算；來不及預留的待審核單自動退回；沒被人改過的規則與需求文字用新版更新
+  function migrate(s) {
+    var v = (s.meta && s.meta.data_version) || 1;
+    if (v >= DATA_VERSION) return s;
+    var sum = {};
+    s.orders.forEach(function (o) {
+      if (o.status !== 'APPROVED') return;
+      o.lines.forEach(function (l) { sum[l.sku] = (sum[l.sku] || 0) + l.qty; });
+    });
+    s.products.forEach(function (p) { p.reserved = sum[p.sku] || 0; });
+    s.orders.filter(function (o) { return o.status === 'SUBMITTED'; })
+      .sort(function (a, b) { return a.id < b.id ? -1 : 1; })
+      .forEach(function (o) {
+        var need = {};
+        o.lines.forEach(function (l) { need[l.sku] = (need[l.sku] || 0) + l.qty; });
+        var skus = Object.keys(need);
+        var enough = skus.every(function (k) { var p = prodOf(s, k); return !!p && p.on_hand - p.reserved >= need[k]; });
+        var msg;
+        if (enough) {
+          skus.forEach(function (k) { prodOf(s, k).reserved += need[k]; });
+          msg = o.id + ' 資料升級：待審核訂單補上預留';
+        } else {
+          o.history.push({ at: now(), by: 'SYSTEM', from: 'SUBMITTED', to: 'RETURNED', note: '資料升級：可用庫存不足，已退回' });
+          o.status = 'RETURNED';
+          o.return_reason = '系統升級為「送出即預留」，當時可用庫存不足，請修改後重新送出';
+          msg = o.id + ' 資料升級：可用庫存不足，已退回請重送';
+        }
+        s.audit.push({
+          id: 'AU-' + pad(s.seq.audit++, 4), at: now(), actor: 'SYSTEM', actor_name: '系統', role: '-',
+          action: 'MIGRATED', rule: 'RULE-003', target: o.id, ok: enough, message: msg, detail: {}
+        });
+      });
+    s.wb.rules = s.wb.rules.map(function (r) {
+      var t = r.edited_at ? null : Rules.RULE_TEMPLATES.filter(function (x) { return x.id === r.id; })[0];
+      return t ? fromTemplate(t, r) : r;
+    });
+    s.wb.requirements.forEach(function (r) {
+      var c = Rules.REQ_CATALOG[r.id];
+      if (!c || r.edited) return;
+      r.text = c.text; r.priority = c.priority; r.quality = c.quality.slice();
+    });
+    if (s.wb.interview.step >= Rules.DONE_STEP && !s.wb.requirements.some(function (r) { return r.id === 'REQ-010'; })) {
+      var c10 = Rules.REQ_CATALOG['REQ-010'];
+      s.wb.requirements.push({
+        id: 'REQ-010', text: c10.text, priority: c10.priority, quality: c10.quality.slice(), group: '',
+        status: 'ai', source: 'AI 流程走查（升級補充）', evidence: 'AI 依「單據狀態」難點推論（沒有使用者原話）',
+        note: '送出即預留後，老闆要能核准或拒絕待審核單；拒絕要釋放預留', edited: false,
+        history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充' }]
+      });
+    }
+    s.meta.data_version = DATA_VERSION;
+    return s;
+  }
+
   function load() {
     try {
       var raw = localStorage.getItem(KEY);
       if (raw) {
         var s = JSON.parse(raw);
-        if (valid(s)) return s;
+        if (valid(s)) return migrate(s);
       }
     } catch (e) { /* file:// 或隱私模式可能擋 localStorage，改用記憶體 */ }
     return fallback ? clone(fallback) : clone(SEED);
@@ -226,24 +295,30 @@ var Store = (function () {
     if (blockers.length) return result(false, '還有需求未決定：' + blockers.join('、'), db);
     var s = clone(db);
     var created = [];
+    var titles = [];
     Rules.RULE_TEMPLATES.forEach(function (tpl) {
       var req = findReq(s, tpl.primary);
       var on = !!req && req.status === 'confirmed';
       var existing = findRule(s, tpl.id);
-      if (existing) { existing.orphan = !on; return; }
+      if (existing) {
+        existing.orphan = !on;
+        // 沒被人改過的規則，用最新範本更新內容
+        if (!existing.edited_at) {
+          var i = s.wb.rules.indexOf(existing);
+          s.wb.rules[i] = fromTemplate(tpl, existing);
+          s.wb.rules[i].orphan = !on;
+        }
+        return;
+      }
       if (!on) return;
-      var rule = clone(tpl);
-      rule.version = 'v0.1.0';
-      rule.orphan = false;
-      rule.created_at = now();
-      rule.edited_at = null;
-      s.wb.rules.push(rule);
-      created.push(rule.id);
+      s.wb.rules.push(fromTemplate(tpl, null));
+      created.push(tpl.id);
+      titles.push(tpl.title);
     });
     s.wb.rules.sort(function (a, b) { return a.id < b.id ? -1 : 1; });
     if (!s.wb.rules.length) return result(false, '沒有可建立規則的已確認需求', db);
     wbLog(s, 'RULES_BUILD', created.join(',') || '無新增');
-    return result(true, created.length ? '已建立 ' + created.length + ' 條 IF 規則：' + created.join('、') : '規則已是最新（共 ' + s.wb.rules.length + ' 條）', s);
+    return result(true, created.length ? '已建立 ' + created.length + ' 條規則：' + titles.join('、') : '規則已是最新（共 ' + s.wb.rules.length + ' 條）', s);
   };
 
   var RULE_FIELDS = ['title', 'if', 't.action', 't.effect', 't.message', 't.audit', 't.tests', 't.final',
@@ -261,7 +336,7 @@ var Store = (function () {
     rule.edited_at = now();
     var ck = Rules.check(rule);
     wbLog(s, 'RULE_EDIT', ruleId + ' ' + field);
-    return result(true, ruleId + ' 已更新（閉環 ' + ck.score + '／8）', s);
+    return result(true, '已儲存（8 項檢查已完成 ' + ck.score + ' 項）', s);
   };
 
   // ---------- C 開發包 ----------
@@ -271,7 +346,7 @@ var Store = (function () {
     var s = clone(db);
     s.wb.devpack = { at: now(), ready: pack.ready, blocked: pack.blocked, version: Rules.nextVersion(s.wb.versions) };
     wbLog(s, 'DEVPACK', pack.ready.join(','));
-    return result(true, '開發包已產生：' + pack.ready.length + ' 條規則進入開發，' + pack.blocked.length + ' 條被閘門擋下', s);
+    return result(true, '開發包已產生：' + pack.ready.length + ' 條規則可以開發，' + pack.blocked.length + ' 條先不做（還沒寫完整）', s);
   };
 
   // ---------- D 驗收、追蹤、版本 ----------
@@ -284,7 +359,7 @@ var Store = (function () {
     });
     if (s.wb.testRuns.length > 30) s.wb.testRuns = s.wb.testRuns.slice(-30);
     wbLog(s, 'TEST_RUN', pass + '/' + results.length);
-    return result(pass === results.length, '驗收測試 ' + pass + '／' + results.length + ' PASS', s);
+    return result(pass === results.length, '驗收測試 ' + pass + '／' + results.length + ' 項通過', s);
   };
 
   wb.setCheck = function (db, key, value) {

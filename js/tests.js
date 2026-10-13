@@ -1,7 +1,8 @@
-/* tests.js — 第一版 9 個驗收測試（每條規則的 True 和 False 都要 PASS）
+/* tests.js — 第一版 13 個驗收測試（每條規則的「成立」和「不成立」都要 PASS）
  * 全域物件：Tests
  * - 每個案例都從 SEED 的複本開始，不碰 localStorage。
- * - 不可為了讓測試通過而修改本檔，除非使用者同意。
+ * - 2026-10-13 使用者決定改為「送出即預留」（REQ-004B），本檔依新規則改寫（使用者已同意修改 tests.js）。
+ * - 之後不可為了讓測試通過而修改本檔，除非使用者同意。
  * 主控台：Tests.runAll()
  */
 var Tests = (function () {
@@ -19,14 +20,18 @@ var Tests = (function () {
     expect(bad.length === 0, '庫存不變式被破壞：' + bad.join('；'));
   }
 
-  // 業務建立並送出一張叫貨單，回傳 { state, id }
+  // 業務把品項放進購物車（不預留），回傳 { state, id }
+  function cart(db, userId, sku, qty) {
+    var r = ERP.addLine(db, userId, sku, qty, '測試客戶');
+    expect(r.ok, '加入叫貨失敗：' + r.message);
+    return { state: r.state, id: r.data.order_id };
+  }
+  // 放進購物車並送出（送出時預留），回傳 { state, id }
   function submitted(db, userId, sku, qty) {
-    var r1 = ERP.addLine(db, userId, sku, qty, '測試客戶');
-    expect(r1.ok, '加入叫貨失敗：' + r1.message);
-    var id = r1.data.order_id;
-    var r2 = ERP.submitOrder(r1.state, userId, id);
-    expect(r2.ok, '送出失敗：' + r2.message);
-    return { state: r2.state, id: id };
+    var c = cart(db, userId, sku, qty);
+    var r = ERP.submitOrder(c.state, userId, c.id);
+    expect(r.ok, '送出失敗：' + r.message);
+    return { state: r.state, id: c.id };
   }
 
   var cases = [
@@ -34,7 +39,7 @@ var Tests = (function () {
       id: 'TC-001-01', rule: 'RULE-001', req: 'REQ-006', branch: 'True',
       title: '業務查庫存 → 看不到成本',
       given: '業務 阿明 查詢全部庫存',
-      expect: '每一筆結果物件都沒有 cost、margin 欄位',
+      expect: '每一筆結果都沒有成本、毛利欄位',
       run: function () {
         var db = fresh();
         var r = ERP.queryStock(db, 'U01', '');
@@ -45,14 +50,14 @@ var Tests = (function () {
           expect(!('margin' in row), row.sku + ' 含 margin 欄位');
         });
         expect(lastAudit(r.state).action === 'QUERY', '沒有寫查詢稽核');
-        return '回傳 ' + r.data.length + ' 筆，欄位：' + Object.keys(r.data[0]).join(', ');
+        return '回傳 ' + r.data.length + ' 筆，每一筆都沒有成本、毛利欄位';
       }
     },
     {
       id: 'TC-001-02', rule: 'RULE-001', req: 'REQ-006', branch: 'False',
-      title: '老闆查庫存 → 可以看到成本',
+      title: '老闆查庫存 → 看得到成本',
       given: '老闆 王老闆 查詢規格 205/55R16',
-      expect: '結果含 cost（2650）與 margin；庫存資料不變',
+      expect: '結果有成本 2650 與毛利 650；庫存不變',
       run: function () {
         var db = fresh();
         var r = ERP.queryStock(db, 'U03', '205/55R16');
@@ -61,12 +66,12 @@ var Tests = (function () {
         expect(r.data[0].cost === 2650, 'cost 不對：' + r.data[0].cost);
         expect(r.data[0].margin === 650, 'margin 不對：' + r.data[0].margin);
         expect(stock(r.state) === stock(db), '查詢改到了庫存');
-        return 'TR-001 cost = ' + r.data[0].cost + '，margin = ' + r.data[0].margin;
+        return 'TR-001 成本 ' + r.data[0].cost + '，毛利 ' + r.data[0].margin;
       }
     },
     {
       id: 'TC-002-01', rule: 'RULE-002', req: 'REQ-003', branch: 'False',
-      title: '叫貨數量 0／負數／小數 → 不可送出',
+      title: '叫貨數量填 0、負數、小數、文字 → 不能加入',
       given: '業務叫貨 TR-003，數量 0、-1、1.5、"2.5"、""、"abc"、null',
       expect: '全部被拒，訊息「叫貨數量必須為正整數」，不建立訂單，庫存不變',
       run: function () {
@@ -85,105 +90,100 @@ var Tests = (function () {
     },
     {
       id: 'TC-002-02', rule: 'RULE-002', req: 'REQ-003', branch: 'True',
-      title: '叫貨數量 2 → 送出成功，尚未預留',
-      given: '業務叫貨 TR-003 × 2 並送出',
-      expect: '訂單 SUBMITTED；預留不變（核准才預留）',
+      title: '叫貨數量填 2 → 成功加入購物車（還沒預留）',
+      given: '業務叫貨 TR-003 × 2（只加入，還沒送出）',
+      expect: '訂單是「購物車」；庫存和預留都不變',
       run: function () {
         var db = fresh();
-        var x = submitted(db, 'U01', 'TR-003', 2);
-        var o = order(x.state, x.id);
-        expect(o.status === 'SUBMITTED', '狀態不是 SUBMITTED：' + o.status);
+        var c = cart(db, 'U01', 'TR-003', 2);
+        var o = order(c.state, c.id);
+        expect(o.status === 'DRAFT', '狀態不是 DRAFT：' + o.status);
         expect(o.lines[0].qty === 2, '數量不對');
-        expect(stock(x.state) === stock(db), '送出就動到庫存（違反 REQ-004）');
-        return x.id + ' SUBMITTED，TR-003 可用仍為 ' + avail(x.state, 'TR-003');
+        expect(stock(c.state) === stock(db), '加入購物車就動到庫存');
+        expect(lastAudit(c.state).action === 'ADD_LINE', '沒有寫加入稽核');
+        return c.id + ' 購物車，TR-003 可用仍為 ' + avail(c.state, 'TR-003');
       }
     },
     {
-      id: 'TC-004-01', rule: 'RULE-004', req: 'REQ-004', branch: 'True',
-      title: '可用 124，核准 2 → APPROVED，可用 122',
-      given: 'TR-001 在庫 130、預留 6（可用 124），叫貨 2 已送出',
-      expect: '王老闆核准 → APPROVED；預留 8、可用 122；在庫不變；稽核 APPROVED',
+      id: 'TC-003-01', rule: 'RULE-003', req: 'REQ-004B', branch: 'True',
+      title: '可用 124，送出 2 → 成功，可用變 122',
+      given: 'TR-001 在庫 130、預留 6（可用 124），業務送出 2 條',
+      expect: '訂單變「待審核」；預留 8、可用 122；在庫不變；稽核「送出並預留」',
       run: function () {
         var db = fresh();
         expect(avail(db, 'TR-001') === 124, '前提不符：可用 ' + avail(db, 'TR-001'));
-        var x = submitted(db, 'U01', 'TR-001', 2);
-        var r = ERP.approveOrder(x.state, 'U03', x.id);
+        var c = cart(db, 'U01', 'TR-001', 2);
+        var r = ERP.submitOrder(c.state, 'U01', c.id);
         expect(r.ok, r.message);
-        expect(order(r.state, x.id).status === 'APPROVED', '狀態不是 APPROVED');
+        expect(order(r.state, c.id).status === 'SUBMITTED', '狀態不是 SUBMITTED');
         expect(product(r.state, 'TR-001').reserved === 8, '預留不是 8');
         expect(product(r.state, 'TR-001').on_hand === 130, '在庫被改動');
         expect(avail(r.state, 'TR-001') === 122, '可用不是 122：' + avail(r.state, 'TR-001'));
-        expect(lastAudit(r.state).action === 'APPROVED', '沒有寫 APPROVED 稽核');
-        expect(r.message.indexOf('核准成功') >= 0, '訊息不對：' + r.message);
+        expect(lastAudit(r.state).action === 'SUBMITTED', '沒有寫 SUBMITTED 稽核');
+        expect(r.message.indexOf('已送出') >= 0 && r.message.indexOf('預留') >= 0, '訊息不對：' + r.message);
         invariantsOk(r.state);
         return '可用 124 → ' + avail(r.state, 'TR-001') + '；' + r.message;
       }
     },
     {
-      id: 'TC-004-02', rule: 'RULE-004', req: 'REQ-004', branch: 'False',
-      title: '可用 1，核准 2 → REJECTED，資料不變',
-      given: 'TR-002 在庫 3、預留 2（可用 1），叫貨 2 已送出',
-      expect: '王老闆核准 → REJECTED；所有品項在庫、預留完全不變；稽核 REJECTED',
+      id: 'TC-003-02', rule: 'RULE-003', req: 'REQ-004B', branch: 'False',
+      title: '可用 1，送出 2 → 不能送出，資料不變',
+      given: 'TR-002 在庫 3、預留 2（可用 1），業務想送出 2 條',
+      expect: '被拒絕；訂單留在購物車；所有品項在庫、預留完全不變；稽核「送出被拒」',
       run: function () {
         var db = fresh();
         expect(avail(db, 'TR-002') === 1, '前提不符：可用 ' + avail(db, 'TR-002'));
-        var x = submitted(db, 'U01', 'TR-002', 2);
-        var before = stock(x.state);
-        var others = JSON.stringify(x.state.orders.filter(function (o) { return o.id !== x.id; }));
-        var r = ERP.approveOrder(x.state, 'U03', x.id);
-        expect(!r.ok, '庫存不足竟然核准成功');
-        expect(order(r.state, x.id).status === 'REJECTED', '狀態不是 REJECTED');
+        var c = cart(db, 'U01', 'TR-002', 2);
+        var before = stock(c.state);
+        var r = ERP.submitOrder(c.state, 'U01', c.id);
+        expect(!r.ok, '庫存不足竟然送出成功');
+        expect(order(r.state, c.id).status === 'DRAFT', '訂單不在購物車：' + order(r.state, c.id).status);
         expect(stock(r.state) === before, '庫存資料被改動');
-        expect(JSON.stringify(r.state.orders.filter(function (o) { return o.id !== x.id; })) === others, '其他訂單被改動');
-        expect(lastAudit(r.state).action === 'REJECTED', '沒有寫 REJECTED 稽核');
+        expect(lastAudit(r.state).action === 'SUBMIT_DENIED', '沒有寫 SUBMIT_DENIED 稽核');
         expect(r.message.indexOf('可用庫存不足') >= 0, '訊息不對：' + r.message);
         invariantsOk(r.state);
         return r.message;
       }
     },
     {
-      id: 'TC-004-03', rule: 'RULE-004', req: 'REQ-004', branch: '邊界',
-      title: '兩人同時核准最後 1 條 → 只有一張 APPROVED',
-      given: 'TR-002 可用 1；阿明、小芳各送出 1 條；王老闆與王太太同時打開待審核畫面',
-      expect: '兩人畫面都顯示可用 1；依序核准後只有一張 APPROVED、另一張 REJECTED；可用 0',
+      id: 'TC-003-03', rule: 'RULE-003', req: 'REQ-004B', branch: '邊界',
+      title: '兩位業務同時送最後 1 條 → 只有 1 人成功',
+      given: 'TR-002 可用 1；阿明、小芳各把 1 條放進購物車，兩人的畫面都顯示可用 1，然後先後按送出',
+      expect: '只有 1 張變「待審核」，另 1 張留在購物車並被告知庫存不足；可用 0',
       run: function () {
         var db = fresh();
-        var a = submitted(db, 'U01', 'TR-002', 1);
-        var b = submitted(a.state, 'U02', 'TR-002', 1);
+        var a = cart(db, 'U01', 'TR-002', 1);
+        var b = cart(a.state, 'U02', 'TR-002', 1);
         var store = Store.memory(b.state);
-        // 兩位老闆的畫面在同一時間載入，看到的可用量都是 1（舊畫面）
-        var viewBoss = ERP.view.pending(store.load(), 'U03');
-        var viewWife = ERP.view.pending(store.load(), 'U04');
-        [viewBoss, viewWife].forEach(function (v) {
-          v.filter(function (o) { return o.id === a.id || o.id === b.id; }).forEach(function (o) {
-            expect(o.lines[0].available === 1, '前提不符：畫面可用 ' + o.lines[0].available);
-          });
-        });
-        // 核准時以 transact 重新讀取最新狀態，不用畫面上的舊數字
-        var r1 = store.transact(function (cur) { return ERP.approveOrder(cur, 'U03', a.id); });
-        var r2 = store.transact(function (cur) { return ERP.approveOrder(cur, 'U04', b.id); });
+        // 兩位業務的畫面在同一時間載入，看到的可用量都是 1（舊畫面）
+        expect(ERP.view.availableOf(store.load(), 'TR-002') === 1, '前提不符');
+        // 送出時以 transact 重新讀取最新狀態，不用畫面上的舊數字
+        var r1 = store.transact(function (cur) { return ERP.submitOrder(cur, 'U01', a.id); });
+        var r2 = store.transact(function (cur) { return ERP.submitOrder(cur, 'U02', b.id); });
         var fin = store.load();
         var statuses = [order(fin, a.id).status, order(fin, b.id).status];
-        var approved = statuses.filter(function (s) { return s === 'APPROVED'; }).length;
-        expect(approved === 1, '核准張數是 ' + approved + '（' + statuses.join('、') + '）');
-        expect(statuses.indexOf('REJECTED') >= 0, '另一張沒有變成 REJECTED');
+        var ok = statuses.filter(function (s) { return s === 'SUBMITTED'; }).length;
+        expect(ok === 1, '送出成功的張數是 ' + ok + '（' + statuses.join('、') + '）');
+        expect(statuses.indexOf('DRAFT') >= 0, '另一張沒有留在購物車');
         expect(avail(fin, 'TR-002') === 0, '可用不是 0：' + avail(fin, 'TR-002'));
-        expect(r1.ok !== r2.ok, '兩次核准結果相同');
+        expect(r1.ok !== r2.ok, '兩次送出結果相同');
         invariantsOk(fin);
-        return a.id + ' ' + statuses[0] + '、' + b.id + ' ' + statuses[1] + '；TR-002 可用 ' + avail(fin, 'TR-002');
+        return a.id + '「' + Rules.ORDER_STATUS[statuses[0]] + '」、' + b.id + '「' + Rules.ORDER_STATUS[statuses[1]] + '」；TR-002 可用 ' + avail(fin, 'TR-002');
       }
     },
     {
       id: 'TC-005-01', rule: 'RULE-005', req: 'REQ-007', branch: 'True',
-      title: '退回待審核訂單 → RETURNED，可修改重送',
-      given: '阿明送出 TR-003 × 2；王老闆退回',
-      expect: 'RETURNED；阿明改成 3 後重送 → SUBMITTED；過程中預留不變',
+      title: '退回待審核訂單 → 釋放預留，可修改重送',
+      given: '阿明送出 TR-003 × 2（已預留）；王老闆退回；阿明改成 3 後重送',
+      expect: '退回後預留還給庫存（和一開始一樣）；重送後待審核、預留 3 條',
       run: function () {
         var db = fresh();
         var x = submitted(db, 'U01', 'TR-003', 2);
+        expect(avail(x.state, 'TR-003') === avail(db, 'TR-003') - 2, '送出沒有預留');
         var r = ERP.returnOrder(x.state, 'U03', x.id, '數量打錯');
         expect(r.ok, r.message);
         expect(order(r.state, x.id).status === 'RETURNED', '狀態不是 RETURNED');
+        expect(stock(r.state) === stock(db), '退回後預留沒有釋放');
         expect(lastAudit(r.state).action === 'RETURNED', '沒有寫 RETURNED 稽核');
         var r2 = ERP.updateLine(r.state, 'U01', x.id, 'TR-003', 3);
         expect(r2.ok, '退回後不能修改：' + r2.message);
@@ -191,15 +191,16 @@ var Tests = (function () {
         expect(r3.ok, '不能重送：' + r3.message);
         var o = order(r3.state, x.id);
         expect(o.status === 'SUBMITTED' && o.lines[0].qty === 3, '重送後狀態或數量不對');
-        expect(stock(r3.state) === stock(db), '退回／重送動到庫存');
-        return x.id + '：SUBMITTED → RETURNED → 修改為 3 → SUBMITTED';
+        expect(avail(r3.state, 'TR-003') === avail(db, 'TR-003') - 3, '重送後預留不是 3');
+        invariantsOk(r3.state);
+        return x.id + '：待審核 → 被退回（預留釋放）→ 修改為 3 → 待審核（預留 3）';
       }
     },
     {
       id: 'TC-005-02', rule: 'RULE-005', req: 'REQ-007', branch: 'False',
-      title: '退回已核准訂單 → 拒絕，狀態不變',
-      given: 'SO-0001 已核准；另有一張 DRAFT 購物車',
-      expect: '兩者都不能退回，訊息「只有待審核…」；狀態、庫存不變；稽核 RETURN_DENIED',
+      title: '退回已核准訂單 → 被拒絕，狀態不變',
+      given: 'SO-0001 已核准；另有一張購物車',
+      expect: '兩者都不能退回，訊息「只有待審核…」；狀態、庫存不變；稽核「退回被拒」',
       run: function () {
         var db = fresh();
         var r = ERP.returnOrder(db, 'U03', 'SO-0001', '想退回');
@@ -210,8 +211,91 @@ var Tests = (function () {
         expect(lastAudit(r.state).action === 'RETURN_DENIED', '沒有寫 RETURN_DENIED 稽核');
         var d = ERP.addLine(db, 'U01', 'TR-007', 1);
         var r2 = ERP.returnOrder(d.state, 'U03', d.data.order_id, '');
-        expect(!r2.ok && order(r2.state, d.data.order_id).status === 'DRAFT', 'DRAFT 竟然可以退回');
-        return 'APPROVED、DRAFT 都被拒絕退回；' + r.message;
+        expect(!r2.ok && order(r2.state, d.data.order_id).status === 'DRAFT', '購物車竟然可以退回');
+        return '已核准、購物車都被拒絕退回；' + r.message;
+      }
+    },
+    {
+      id: 'TC-006-01', rule: 'RULE-006', req: 'REQ-010', branch: 'True',
+      title: '老闆核准待審核訂單 → 已核准，庫存不變',
+      given: '阿明送出 TR-001 × 2（可用 122）；王老闆核准',
+      expect: '訂單變「已核准」；預留與可用都和核准前一樣（預留早就建立了）；稽核「老闆核准」',
+      run: function () {
+        var db = fresh();
+        var x = submitted(db, 'U01', 'TR-001', 2);
+        var before = stock(x.state);
+        var r = ERP.approveOrder(x.state, 'U03', x.id);
+        expect(r.ok, r.message);
+        expect(order(r.state, x.id).status === 'APPROVED', '狀態不是 APPROVED');
+        expect(stock(r.state) === before, '核准改動了庫存');
+        expect(avail(r.state, 'TR-001') === 122, '可用不是 122：' + avail(r.state, 'TR-001'));
+        expect(lastAudit(r.state).action === 'APPROVED', '沒有寫 APPROVED 稽核');
+        expect(r.message.indexOf('核准成功') >= 0, '訊息不對：' + r.message);
+        invariantsOk(r.state);
+        return r.message;
+      }
+    },
+    {
+      id: 'TC-006-02', rule: 'RULE-006', req: 'REQ-010', branch: 'False',
+      title: '業務核准、重複核准、核准購物車 → 都被拒絕',
+      given: '一張待審核訂單；業務想核准；老闆核准兩次；老闆想核准購物車',
+      expect: '只有老闆第一次核准成功，其餘都被拒絕，狀態與庫存不變，稽核「核准被拒」',
+      run: function () {
+        var db = fresh();
+        var x = submitted(db, 'U01', 'TR-001', 2);
+        var before = stock(x.state);
+        var r1 = ERP.approveOrder(x.state, 'U02', x.id);
+        expect(!r1.ok && order(r1.state, x.id).status === 'SUBMITTED' && stock(r1.state) === before, '業務竟然能核准');
+        expect(lastAudit(r1.state).action === 'APPROVE_DENIED', '沒有寫 APPROVE_DENIED 稽核');
+        var d = cart(db, 'U01', 'TR-007', 1);
+        var r2 = ERP.approveOrder(d.state, 'U03', d.id);
+        expect(!r2.ok && order(r2.state, d.id).status === 'DRAFT', '購物車竟然能核准');
+        var a = ERP.approveOrder(x.state, 'U03', x.id);
+        expect(a.ok, '老闆第一次核准失敗：' + a.message);
+        var b = ERP.approveOrder(a.state, 'U04', x.id);
+        expect(!b.ok && stock(b.state) === stock(a.state), '重複核准竟然成功或改動了庫存');
+        invariantsOk(b.state);
+        return '業務核准、核准購物車、重複核准都被拒絕';
+      }
+    },
+    {
+      id: 'TC-007-01', rule: 'RULE-007', req: 'REQ-010', branch: 'True',
+      title: '老闆拒絕待審核訂單 → 釋放預留，可用恢復',
+      given: '阿明送出 TR-001 × 2（可用 122）；王老闆拒絕',
+      expect: '訂單變「已拒絕」；可用回到 124，庫存和一開始一模一樣；稽核「老闆拒絕」',
+      run: function () {
+        var db = fresh();
+        var x = submitted(db, 'U01', 'TR-001', 2);
+        expect(avail(x.state, 'TR-001') === 122, '前提不符');
+        var r = ERP.rejectOrder(x.state, 'U03', x.id, '客戶取消');
+        expect(r.ok, r.message);
+        expect(order(r.state, x.id).status === 'REJECTED', '狀態不是 REJECTED');
+        expect(stock(r.state) === stock(db), '拒絕後預留沒有釋放');
+        expect(avail(r.state, 'TR-001') === 124, '可用不是 124');
+        expect(lastAudit(r.state).action === 'REJECTED', '沒有寫 REJECTED 稽核');
+        invariantsOk(r.state);
+        return r.message;
+      }
+    },
+    {
+      id: 'TC-007-02', rule: 'RULE-007', req: 'REQ-010', branch: 'False',
+      title: '業務拒絕、拒絕已核准或購物車 → 都被拒絕',
+      given: '一張待審核訂單；業務想拒絕；老闆想拒絕已核准的 SO-0001；老闆想拒絕購物車',
+      expect: '全部被拒絕，狀態與庫存不變，稽核「拒絕被拒」',
+      run: function () {
+        var db = fresh();
+        var x = submitted(db, 'U01', 'TR-001', 2);
+        var before = stock(x.state);
+        var r1 = ERP.rejectOrder(x.state, 'U02', x.id, '');
+        expect(!r1.ok && order(r1.state, x.id).status === 'SUBMITTED' && stock(r1.state) === before, '業務竟然能拒絕');
+        expect(lastAudit(r1.state).action === 'REJECT_DENIED', '沒有寫 REJECT_DENIED 稽核');
+        var r2 = ERP.rejectOrder(x.state, 'U03', 'SO-0001', '');
+        expect(!r2.ok && order(r2.state, 'SO-0001').status === 'APPROVED' && stock(r2.state) === before, '已核准訂單竟然能拒絕');
+        var d = cart(db, 'U01', 'TR-007', 1);
+        var r3 = ERP.rejectOrder(d.state, 'U03', d.id, '');
+        expect(!r3.ok && order(r3.state, d.id).status === 'DRAFT', '購物車竟然能拒絕');
+        invariantsOk(r3.state);
+        return '業務拒絕、拒絕已核准、拒絕購物車都被拒絕';
       }
     }
   ];
