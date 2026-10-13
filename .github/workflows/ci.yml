@@ -1,0 +1,36 @@
+# 自動回歸：每次推送或發 Pull Request，都在乾淨的環境重跑全部檢查。
+# 只用 Node 內建功能，不需要安裝任何套件。
+# 注意：這個專案目前還沒有設定 GitHub 遠端，所以這份設定檔尚未在 GitHub 上實際執行過；
+#       同一組指令已在本機的乾淨檢出版本驗證過（見 CLAUDE.md 的說明）。
+name: 回歸檢查
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 一鍵回歸（靜態限制、驗收測試、領域規則、隨機操作、舊資料升級、版本線）
+        run: node dev/regression.js
+
+      - name: 留下 JSON 報告
+        if: always()
+        run: node dev/regression.js --json > regression-report.json || true
+
+      - name: 上傳報告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-report
+          path: regression-report.json

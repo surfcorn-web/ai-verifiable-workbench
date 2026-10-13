@@ -32,5 +32,8 @@ Coding Agent＝開發引擎。以輪胎批發 ERP 做垂直切片：查庫存→
 - 畫面給不懂程式的人看：用白話；REQ／RULE／TC 編號與英文狀態碼只能當小字，程式細節放在「技術細節」摺疊區。
 - 每一頁都要說明「這一頁在做什麼」與「建議下一步」。
 - 不可為了讓測試通過而修改 tests.js，除非使用者同意。
+- `dev/` 是開發用的檢查工具（只用 Node 內建功能、不需安裝；不屬於 App，index.html 與各 js 不可引用它）。
+  每一步做完、提交前都要跑 `node dev/regression.js`，全部通過才能提交；新增功能時同步補上對應檢查。
+- `.github/workflows/ci.yml` 是同一組檢查的自動回歸設定（尚未設定 GitHub 遠端，未在 GitHub 上實際執行過）。
 - 每完成一步：說明如何驗收 → 等使用者確認 → 才 commit。
 - commit 訊息用 feat:/fix:/test:/docs: 前綴，中文描述。
