@@ -73,6 +73,11 @@ var App = (function () {
   }
   function orderPill(s) { return '<span class="pill st-' + esc(s) + '">' + esc(Rules.ORDER_STATUS[s] || s) + '</span>'; }
   function reqPill(s) { return '<span class="pill st-' + esc(s) + '">' + esc(Rules.REQ_STATUS[s] || s) + '</span>'; }
+  // 可點擊的狀態標籤：點了開啟「修改狀態」選單
+  function reqPillBtn(r) {
+    return '<button type="button" class="pill pill-btn st-' + esc(r.status) + '" data-act="req-menu" data-id="' + esc(r.id) +
+      '" title="點選修改狀態" aria-haspopup="dialog">' + esc(Rules.REQ_STATUS[r.status] || r.status) + ' ▾</button>';
+  }
   function reqById(id) { return db.wb.requirements.filter(function (r) { return r.id === id; })[0] || null; }
   function sortedReqs() {
     return db.wb.requirements.slice().sort(function (a, b) { return Rules.REQ_ORDER.indexOf(a.id) - Rules.REQ_ORDER.indexOf(b.id); });
@@ -272,8 +277,8 @@ var App = (function () {
         '<aside class="card">' +
           '<h2>即時整理的需求（草稿）</h2>' +
           (reqs.length ? '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>ID</th><th>需求</th><th>狀態</th></tr></thead><tbody>' +
-            reqs.map(function (r) { return '<tr><td class="nowrap mono">' + esc(r.id) + '</td><td>' + esc(r.text) + '</td><td>' + reqPill(r.status) + '</td></tr>'; }).join('') +
-            '</tbody></table></div>' : '<p class="muted">訪談開始後，AI 會在這裡即時整理需求。</p>') +
+            reqs.map(function (r) { return '<tr><td class="nowrap mono">' + esc(r.id) + '</td><td>' + esc(r.text) + '</td><td>' + reqPillBtn(r) + '</td></tr>'; }).join('') +
+            '</tbody></table></div><p class="hint">點「狀態」標籤可直接修改（確認、採納、延後、拒絕、撤回）。</p>' : '<p class="muted">訪談開始後，AI 會在這裡即時整理需求。</p>') +
           '<h3>尚待釐清 <span class="count-badge">' + open + '</span></h3>' +
           (it.questions.length ? '<ul class="qs">' + it.questions.map(function (q, i) {
             return '<li class="' + (q.resolved ? 'done' : '') + '">' + esc(q.text) + (q.resolved ? '' : ' <button type="button" class="link" data-act="resolve-q" data-i="' + i + '">標為已釐清</button>') + '</li>';
@@ -852,6 +857,37 @@ var App = (function () {
         return;
       }
       act(function (cur) { return Store.wb.setReqStatus(cur, id, op); });
+    },
+    'req-menu': function (el) {
+      var r = reqById(el.dataset.id);
+      if (!r) return;
+      var moves = Rules.REQ_MOVES[r.status] || {};
+      var opts = [
+        { to: 'confirmed', label: r.status === 'ai' ? '採納（已確認）' : '已確認', cls: 'primary' },
+        { to: 'pending', label: '待確認（撤回）', cls: '' },
+        { to: 'deferred', label: '延後', cls: '' },
+        { to: 'rejected', label: '拒絕', cls: 'danger' }
+      ].filter(function (o) { return !!moves[o.to]; });
+      modal({
+        title: r.id + '　修改狀態',
+        html: '<p>' + esc(r.text) + '</p>' +
+          '<p class="small muted" style="margin:8px 0">目前狀態：' + reqPill(r.status) + '　改成：</p>' +
+          '<div class="row-actions">' + opts.map(function (o) {
+            return '<button type="button" class="btn ' + o.cls + '" data-act="req-move" data-id="' + esc(r.id) + '" data-to="' + o.to + '">' + esc(o.label) + '</button>';
+          }).join('') + '</div>' +
+          (r.status === 'pending' ? '<div class="row-actions mt"><button type="button" class="btn ghost sm" data-act="req-edit" data-id="' + esc(r.id) + '">修改需求內容</button></div>' : '') +
+          (r.group ? '<p class="hint">REQ-004（核准才預留）與 REQ-004B（送出即預留）互斥：確認其中一條，另一條會自動標為已拒絕。</p>' : '') +
+          '<p class="hint">AI 只能提出需求；「已確認」一定是由你按下的。</p>'
+      });
+    },
+    'req-move': function (el) {
+      if (App._closeModal) App._closeModal();
+      var id = el.dataset.id, to = el.dataset.to;
+      act(function (cur) { return Store.wb.moveReq(cur, id, to); });
+    },
+    'req-edit': function (el) {
+      if (App._closeModal) App._closeModal();
+      ACTIONS.req({ dataset: { id: el.dataset.id, op: 'edit' } });
     },
     evidence: function (el) {
       var r = reqById(el.dataset.id);

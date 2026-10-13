@@ -190,6 +190,22 @@ var Store = (function () {
     return result(true, id + ' ' + act.word + extra, s);
   };
 
+  // 直接指定目標狀態；需要時自動先撤回再改（全部成功才儲存，中途失敗則資料完全不變）
+  wb.moveReq = function (db, id, to) {
+    var r = findReq(db, id);
+    if (!r) return result(false, '找不到需求 ' + id, db);
+    if (r.status === to) return result(false, id + ' 已經是「' + Rules.REQ_STATUS[to] + '」', db);
+    var path = Rules.REQ_MOVES[r.status] && Rules.REQ_MOVES[r.status][to];
+    if (!path) return result(false, id + ' 目前是「' + Rules.REQ_STATUS[r.status] + '」，不能直接改成「' + Rules.REQ_STATUS[to] + '」', db);
+    var s = db, res = null;
+    for (var i = 0; i < path.length; i++) {
+      res = wb.setReqStatus(s, id, path[i]);
+      if (!res.ok) return result(false, res.message, db);
+      s = res.state;
+    }
+    return result(true, res.message, s);
+  };
+
   wb.editReq = function (db, id, text) {
     text = String(text || '').trim();
     if (!text) return result(false, '需求內容不可空白', db);

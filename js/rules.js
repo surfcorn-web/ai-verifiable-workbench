@@ -18,6 +18,15 @@ var Rules = (function () {
     RETURNED: '退回修改', PARTIALLY_SHIPPED: '部分出貨', SHIPPED: '已出貨', CANCELLED: '已取消'
   };
   var REQ_STATUS = { pending: '待確認', ai: 'AI 推論', confirmed: '已確認', rejected: '已拒絕', deferred: '延後' };
+  // 需求狀態可由「人」改成哪些狀態；值是依序執行的單步操作（已確認／延後／拒絕要先撤回再改）
+  // AI 推論的需求只能被人採納、延後或拒絕，不能退回待確認，更不能由 AI 自己確認
+  var REQ_MOVES = {
+    pending: { confirmed: ['confirm'], deferred: ['defer'], rejected: ['reject'] },
+    ai: { confirmed: ['adopt'], deferred: ['defer'], rejected: ['reject'] },
+    confirmed: { pending: ['revert'], deferred: ['revert', 'defer'], rejected: ['revert', 'reject'] },
+    deferred: { pending: ['revert'], confirmed: ['revert', 'confirm'], rejected: ['revert', 'reject'] },
+    rejected: { pending: ['revert'], confirmed: ['revert', 'confirm'], deferred: ['revert', 'defer'] }
+  };
 
   // =====================================================================
   // 1. ERP 領域規則
@@ -558,7 +567,7 @@ var Rules = (function () {
   }
 
   return {
-    ROLE: ROLE, ORDER_STATUS: ORDER_STATUS, REQ_STATUS: REQ_STATUS,
+    ROLE: ROLE, ORDER_STATUS: ORDER_STATUS, REQ_STATUS: REQ_STATUS, REQ_MOVES: REQ_MOVES,
     available: available, parseQty: parseQty, isPositiveInt: isPositiveInt,
     isSales: isSales, isBoss: isBoss, SALES_FIELDS: SALES_FIELDS, viewFor: viewFor,
     canReturn: canReturn, canApprove: canApprove, canEdit: canEdit,
