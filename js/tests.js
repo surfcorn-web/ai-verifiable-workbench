@@ -1,4 +1,4 @@
-/* tests.js — 第一版 13 個驗收測試（每條規則的「成立」和「不成立」都要 PASS）
+/* tests.js — 驗收測試（每條規則的「成立」和「不成立」都要 PASS）：第一版 13 個＋Sprint 1 進出貨與商品管理 9 個
  * 全域物件：Tests
  * - 每個案例都從 SEED 的複本開始，不碰 localStorage。
  * - 2026-10-13 使用者決定改為「送出即預留」（REQ-004B），本檔依新規則改寫（使用者已同意修改 tests.js）。
@@ -296,6 +296,208 @@ var Tests = (function () {
         expect(!r3.ok && order(r3.state, d.id).status === 'DRAFT', '購物車竟然能拒絕');
         invariantsOk(r3.state);
         return '業務拒絕、拒絕已核准、拒絕購物車都被拒絕';
+      }
+    },
+    // ---------- Sprint 1：商品＋進出貨（新增；上面原有的案例沒有改動）----------
+    {
+      id: 'TC-021-01', rule: 'RULE-021', req: 'REQ-019', branch: 'True',
+      title: '老闆進貨 10 條 → 在庫增加，留下進貨單',
+      given: '老闆 王老闆 對 TR-001 進貨 10 條（在庫 130、預留 6）',
+      expect: '在庫變 140、預留不變、可用變 134；產生進貨單 RC-0001；稽核「進貨入庫」；其他商品不變',
+      run: function () {
+        var db = fresh();
+        var r = ERP.receiveStock(db, 'U03', 'TR-001', 10, '供應商到貨');
+        expect(r.ok, r.message);
+        expect(product(r.state, 'TR-001').on_hand === 140, '在庫不是 140：' + product(r.state, 'TR-001').on_hand);
+        expect(product(r.state, 'TR-001').reserved === 6, '預留被改動');
+        expect(avail(r.state, 'TR-001') === 134, '可用不是 134');
+        var rc = r.state.receipts || [];
+        expect(rc.length === 1 && rc[0].id === 'RC-0001' && rc[0].qty === 10 && rc[0].sku === 'TR-001', '進貨單不對');
+        expect(lastAudit(r.state).action === 'RECEIVED', '沒有寫 RECEIVED 稽核');
+        var others = function (d) { return JSON.stringify(d.products.filter(function (p) { return p.sku !== 'TR-001'; })); };
+        expect(others(r.state) === others(db), '其他商品被改動');
+        invariantsOk(r.state);
+        return r.message;
+      }
+    },
+    {
+      id: 'TC-021-02', rule: 'RULE-021', req: 'REQ-019', branch: 'False',
+      title: '進貨數量填 0、負數、小數，或業務進貨 → 被拒絕',
+      given: '老闆進貨 TR-001，數量 0、-1、1.5、"2.5"、""、"abc"、null；另外業務想進貨、老闆想進不存在的商品',
+      expect: '全部被拒絕，庫存與進貨單完全不變，稽核「進貨被拒」',
+      run: function () {
+        var db = fresh();
+        var bad = [0, -1, 1.5, '2.5', '', 'abc', null];
+        bad.forEach(function (q) {
+          var r = ERP.receiveStock(db, 'U03', 'TR-001', q);
+          expect(!r.ok && r.message === '進貨數量必須為正整數', '數量 ' + JSON.stringify(q) + ' 竟然可以進貨：' + r.message);
+          expect(stock(r.state) === stock(db) && (r.state.receipts || []).length === 0, '資料被改動');
+          expect(lastAudit(r.state).action === 'RECEIVE_DENIED', '沒有寫拒絕稽核');
+        });
+        var s = ERP.receiveStock(db, 'U01', 'TR-001', 5);
+        expect(!s.ok && stock(s.state) === stock(db) && s.message.indexOf('只有老闆') === 0, '業務竟然能進貨');
+        var n = ERP.receiveStock(db, 'U03', 'TR-999', 5);
+        expect(!n.ok && stock(n.state) === stock(db), '不存在的商品竟然能進貨');
+        return bad.length + ' 種錯誤數量、業務進貨、不存在的商品，全部被拒絕';
+      }
+    },
+    {
+      id: 'TC-021-03', rule: 'RULE-021', req: 'REQ-019', branch: '邊界',
+      title: '同一商品連續進貨 → 在庫累加，進貨單號依序',
+      given: '王老闆對 TR-003 進貨 5 條，王太太再進貨 7 條（在庫原本 48）',
+      expect: '在庫變 60；進貨單 RC-0001、RC-0002 不重複，各自記下進貨前後的在庫',
+      run: function () {
+        var db = fresh();
+        var a = ERP.receiveStock(db, 'U03', 'TR-003', 5);
+        var b = ERP.receiveStock(a.state, 'U04', 'TR-003', 7);
+        expect(a.ok && b.ok, '連續進貨失敗');
+        expect(product(b.state, 'TR-003').on_hand === 60, '在庫不是 60：' + product(b.state, 'TR-003').on_hand);
+        var ids = b.state.receipts.map(function (x) { return x.id; });
+        expect(ids.join() === 'RC-0001,RC-0002', '進貨單號不對：' + ids.join());
+        expect(b.state.receipts[1].before === 53 && b.state.receipts[1].after === 60, '進貨前後的在庫沒記對');
+        invariantsOk(b.state);
+        return '在庫 48 → 53 → 60；進貨單 ' + ids.join('、');
+      }
+    },
+    {
+      id: 'TC-010-01', rule: 'RULE-010', req: 'REQ-024', branch: 'True',
+      title: '老闆對已核准的訂單按出貨完成 → 在庫與預留一起扣，可用不變',
+      given: '阿明送出 TR-001 × 2 並經老闆核准（在庫 130、預留 8、可用 122）；老闆按出貨完成。另外出貨種子訂單 SO-0001（兩個品項）',
+      expect: '訂單變「已出貨」；在庫 128、預留 6、可用仍是 122；SO-0001 兩個品項的預留都變 0、可用不變；稽核「出貨完成」',
+      run: function () {
+        var db = fresh();
+        var x = submitted(db, 'U01', 'TR-001', 2);
+        var ap = ERP.approveOrder(x.state, 'U03', x.id);
+        expect(ap.ok, ap.message);
+        expect(product(ap.state, 'TR-001').on_hand === 130 && product(ap.state, 'TR-001').reserved === 8, '核准就動到庫存');
+        var r = ERP.shipOrder(ap.state, 'U03', x.id);
+        expect(r.ok, r.message);
+        expect(order(r.state, x.id).status === 'SHIPPED', '狀態不是 SHIPPED');
+        var p = product(r.state, 'TR-001');
+        expect(p.on_hand === 128 && p.reserved === 6, '在庫或預留不對：' + p.on_hand + '／' + p.reserved);
+        expect(avail(r.state, 'TR-001') === 122, '可用變了：' + avail(r.state, 'TR-001'));
+        expect(lastAudit(r.state).action === 'SHIPPED' && r.message.indexOf('出貨完成') >= 0, '稽核或訊息不對');
+        invariantsOk(r.state);
+        var m = ERP.shipOrder(db, 'U03', 'SO-0001');
+        expect(m.ok, m.message);
+        expect(product(m.state, 'TR-001').on_hand === 124 && product(m.state, 'TR-001').reserved === 0, 'TR-001 沒扣對');
+        expect(product(m.state, 'TR-004').on_hand === 48 && product(m.state, 'TR-004').reserved === 0, 'TR-004 沒扣對');
+        expect(avail(m.state, 'TR-001') === 124 && avail(m.state, 'TR-004') === 48, '可用變了');
+        invariantsOk(m.state);
+        return '在庫 130 → 128、預留 8 → 6、可用維持 122；SO-0001 兩個品項一併出貨';
+      }
+    },
+    {
+      id: 'TC-010-02', rule: 'RULE-010', req: 'REQ-024', branch: 'False',
+      title: '業務出貨、出貨待審核或購物車的訂單 → 被拒絕',
+      given: '業務想出貨已核准的 SO-0001；老闆想出貨待審核的 SO-0004、購物車、不存在的訂單',
+      expect: '全部被拒絕；訂單狀態與庫存完全不變；稽核「出貨被拒」',
+      run: function () {
+        var db = fresh(); var before = stock(db);
+        var a = ERP.shipOrder(db, 'U01', 'SO-0001');
+        expect(!a.ok && a.message.indexOf('只有老闆') === 0 && stock(a.state) === before && order(a.state, 'SO-0001').status === 'APPROVED', '業務竟然能出貨');
+        expect(lastAudit(a.state).action === 'SHIP_DENIED', '沒有寫 SHIP_DENIED 稽核');
+        var b = ERP.shipOrder(db, 'U03', 'SO-0004');
+        expect(!b.ok && b.message.indexOf('只有已核准') === 0 && order(b.state, 'SO-0004').status === 'SUBMITTED' && stock(b.state) === before, '待審核的訂單竟然能出貨：' + b.message);
+        var c = cart(db, 'U01', 'TR-007', 1);
+        var d = ERP.shipOrder(c.state, 'U03', c.id);
+        expect(!d.ok && order(d.state, c.id).status === 'DRAFT' && stock(d.state) === stock(c.state), '購物車竟然能出貨');
+        var e = ERP.shipOrder(db, 'U03', 'SO-9999');
+        expect(!e.ok && stock(e.state) === before, '不存在的訂單竟然能出貨');
+        return '業務、待審核、購物車、不存在的訂單都不能出貨';
+      }
+    },
+    {
+      id: 'TC-010-03', rule: 'RULE-010', req: 'REQ-024', branch: '邊界',
+      title: '同一張單出貨兩次 → 第二次被拒絕，在庫只扣一次',
+      given: '老闆出貨 SO-0001，王太太再按一次出貨',
+      expect: '第二次被拒絕；TR-001 在庫只從 130 扣到 124（不是 118）；出貨紀錄只有一筆',
+      run: function () {
+        var db = fresh();
+        var a = ERP.shipOrder(db, 'U03', 'SO-0001');
+        var b = ERP.shipOrder(a.state, 'U04', 'SO-0001');
+        expect(a.ok && !b.ok, '第二次出貨沒被拒絕');
+        expect(stock(b.state) === stock(a.state), '重複出貨改動了庫存');
+        expect(product(b.state, 'TR-001').on_hand === 124, '在庫被扣了兩次：' + product(b.state, 'TR-001').on_hand);
+        expect(order(b.state, 'SO-0001').history.filter(function (h) { return h.to === 'SHIPPED'; }).length === 1, '出貨紀錄不只一筆');
+        invariantsOk(b.state);
+        return '在庫 130 → 124，只扣一次';
+      }
+    },
+    {
+      id: 'TC-011-01', rule: 'RULE-011', req: 'REQ-025', branch: 'True',
+      title: '老闆新增商品並改價 → 商品出現，業務看不到成本',
+      given: '王老闆新增 195/60R15 固特異（成本 1900、售價 2400），再把售價改成 2500、成本改成 2000',
+      expect: '新商品編號 TR-009、在庫 0；業務查得到但沒有成本欄位；改價後售價 2500；其他商品不變；稽核「新增商品」「修改價格」',
+      run: function () {
+        var db = fresh();
+        var f = { brand: '固特異 Goodyear', name: 'Assurance', spec: '195/60R15', year: 2025, cost: 1900, price: 2400 };
+        var a = ERP.addProduct(db, 'U03', f);
+        expect(a.ok && a.data.sku === 'TR-009', '新增失敗：' + a.message);
+        var p = product(a.state, 'TR-009');
+        expect(p.on_hand === 0 && p.reserved === 0 && p.price === 2400 && p.cost === 1900, '新商品資料不對');
+        expect(a.state.products.length === db.products.length + 1, '商品數量不對');
+        expect(lastAudit(a.state).action === 'PRODUCT_ADDED', '沒有寫 PRODUCT_ADDED 稽核');
+        var q = ERP.queryStock(a.state, 'U01', '195/60R15');
+        expect(q.data.length === 1 && !('cost' in q.data[0]) && q.data[0].price === 2400, '業務查得到商品，但不可看到成本');
+        var u = ERP.updateProduct(a.state, 'U03', 'TR-009', { price: 2500, cost: 2000 });
+        expect(u.ok && product(u.state, 'TR-009').price === 2500 && product(u.state, 'TR-009').cost === 2000, '改價失敗：' + u.message);
+        expect(lastAudit(u.state).action === 'PRODUCT_UPDATED', '沒有寫 PRODUCT_UPDATED 稽核');
+        var others = function (d) { return JSON.stringify(d.products.filter(function (x) { return x.sku !== 'TR-009'; })); };
+        expect(others(u.state) === others(db), '其他商品被改動');
+        invariantsOk(u.state);
+        return a.message;
+      }
+    },
+    {
+      id: 'TC-011-02', rule: 'RULE-011', req: 'REQ-025', branch: 'False',
+      title: '業務新增、缺資料、價格不合理 → 被拒絕',
+      given: '業務想新增商品或改價；老闆新增時缺品牌、缺規格、年份亂填、售價 0 或負數、成本負數；改價填 0、改不存在的商品、價格沒變動',
+      expect: '全部被拒絕；商品清單與價格完全不變；稽核「商品異動被拒」',
+      run: function () {
+        var db = fresh();
+        var ext = function (a, b) { var o = {}; Object.keys(a).forEach(function (k) { o[k] = a[k]; }); Object.keys(b).forEach(function (k) { o[k] = b[k]; }); return o; };
+        var good = { brand: '固特異 Goodyear', name: 'Assurance', spec: '195/60R15', year: 2025, cost: 1900, price: 2400 };
+        var tries = [
+          ['業務新增商品', function () { return ERP.addProduct(db, 'U01', good); }],
+          ['缺品牌', function () { return ERP.addProduct(db, 'U03', ext(good, { brand: '' })); }],
+          ['缺規格', function () { return ERP.addProduct(db, 'U03', ext(good, { spec: '  ' })); }],
+          ['年份亂填', function () { return ERP.addProduct(db, 'U03', ext(good, { year: 'abc' })); }],
+          ['年份太早', function () { return ERP.addProduct(db, 'U03', ext(good, { year: 1800 })); }],
+          ['售價 0', function () { return ERP.addProduct(db, 'U03', ext(good, { price: 0 })); }],
+          ['售價負數', function () { return ERP.addProduct(db, 'U03', ext(good, { price: -5 })); }],
+          ['售價不是數字', function () { return ERP.addProduct(db, 'U03', ext(good, { price: 'abc' })); }],
+          ['成本負數', function () { return ERP.addProduct(db, 'U03', ext(good, { cost: -1 })); }],
+          ['業務改價', function () { return ERP.updateProduct(db, 'U01', 'TR-001', { price: 3500 }); }],
+          ['改價填 0', function () { return ERP.updateProduct(db, 'U03', 'TR-001', { price: 0 }); }],
+          ['改不存在的商品', function () { return ERP.updateProduct(db, 'U03', 'TR-999', { price: 100 }); }],
+          ['價格沒有變動', function () { return ERP.updateProduct(db, 'U03', 'TR-001', { price: 3300, cost: 2650 }); }]
+        ];
+        tries.forEach(function (t) {
+          var r = t[1]();
+          expect(!r.ok, t[0] + ' 竟然成功：' + r.message);
+          expect(JSON.stringify(r.state.products) === JSON.stringify(db.products), t[0] + ' 改動了商品');
+          expect(lastAudit(r.state).action === 'PRODUCT_DENIED', t[0] + ' 沒有寫 PRODUCT_DENIED 稽核');
+        });
+        return tries.length + ' 種不合理的新增或改價，全部被拒絕';
+      }
+    },
+    {
+      id: 'TC-011-03', rule: 'RULE-011', req: 'REQ-025', branch: '邊界',
+      title: '重複新增同一個商品 → 被拒絕，編號不跳號',
+      given: '老闆新增 195/60R15 固特異；再新增一次相同的；再新增另一個商品',
+      expect: '重複的那次被拒絕且不消耗編號；新商品依序是 TR-009、TR-010',
+      run: function () {
+        var db = fresh();
+        var f = { brand: '固特異 Goodyear', name: 'Assurance', spec: '195/60R15', year: 2025, cost: 1900, price: 2400 };
+        var a = ERP.addProduct(db, 'U03', f);
+        var dup = ERP.addProduct(a.state, 'U04', { brand: '固特異 goodyear', name: 'assurance', spec: '195/60r15', year: 2025, cost: 1800, price: 2300 });
+        expect(a.ok && !dup.ok && dup.message.indexOf('已經有這個商品') === 0, '重複新增沒被拒絕：' + dup.message);
+        expect(dup.state.products.length === a.state.products.length, '重複新增多了一筆商品');
+        var b = ERP.addProduct(dup.state, 'U03', { brand: '建大 Kenda', name: 'KR202', spec: '195/60R15', year: 2025, cost: 1500, price: 1900 });
+        expect(b.ok && b.data.sku === 'TR-010', '編號跳號了：' + b.data.sku);
+        invariantsOk(b.state);
+        return '編號 TR-009、TR-010，沒有跳號';
       }
     }
   ];

@@ -37,13 +37,13 @@ var App = (function () {
     { t: '2:15', to: 'confirm', title: '確認需求', say: '逐條決定。確認「送出就預留」時，「核准才預留」會自動標成已拒絕。' },
     { t: '3:00', to: 'rules', title: '檢查規則', say: '「送出叫貨單時先預留庫存」8 項都完成；「取消已核准訂單」缺 2 項，被擋下。' },
     { t: '4:00', to: 'devpack', title: '開發包', say: '產生開發包，按「複製全部」就能貼給 AI 工程師。' },
-    { t: '4:45', to: 'erp', title: '試用 ERP', say: '阿明送 205/55R16 × 2，可用 124 → 122；小芳想送 225/45R17 × 2，可用只有 1，被拒絕；老闆核准，庫存不變。' },
-    { t: '6:30', to: 'verify', title: '驗收測試', say: '按一下，13 項自動檢查全部通過；看「從需求追到驗收」。' },
+    { t: '4:45', to: 'erp', title: '試用 ERP', say: '阿明送 205/55R16 × 2，可用 124 → 122；小芳想送 225/45R17 × 2，可用只有 1，被拒絕；老闆核准，庫存不變；再按「出貨完成」，在庫才真的減少。' },
+    { t: '6:30', to: 'verify', title: '驗收測試', say: '按一下，22 項自動檢查全部通過；看「從需求追到驗收」。' },
     { t: '7:15', to: 'versions', title: '存成版本', say: '勾完人工檢查項目，存成 v0.1.0。' }
   ];
 
-  var FLOW = ['查詢庫存', '加入叫貨', '送出並預留', '更新可用庫存', '老闆審核'];
-  var FLOW_BOSS = 4;
+  var FLOW = ['查詢庫存', '加入叫貨', '送出並預留', '更新可用庫存', '老闆審核', '出貨完成'];
+  var FLOW_BOSS = [4, 5];
 
   // =====================================================================
   // 小工具
@@ -546,6 +546,7 @@ var App = (function () {
       case 'SUBMITTED': return [2, 3];
       case 'SUBMIT_DENIED': return [2];
       case 'APPROVED': case 'REJECTED': case 'RETURNED': return [4];
+      case 'SHIPPED': case 'SHIP_DENIED': return [5];
       default: return [];
     }
   }
@@ -572,6 +573,12 @@ var App = (function () {
       ((opts && opts.actions) ? '<div class="row-actions mt">' + opts.actions + '</div>' : '') + '</div>';
   }
 
+  function productOptions(selected) {
+    return db.products.map(function (p) {
+      return '<option value="' + esc(p.sku) + '"' + (p.sku === selected ? ' selected' : '') + '>' + esc(p.spec + '｜' + p.brand + (p.name ? ' ' + p.name : '') + '｜' + p.year + '（在庫 ' + p.on_hand + '）') + '</option>';
+    }).join('');
+  }
+
   function pageERP() {
     var u = ERP.view.user(db, ui.erpUser) || db.users[0];
     ui.erpUser = u.id;
@@ -584,10 +591,10 @@ var App = (function () {
     var roles = '<div class="roles"><span class="muted small">你現在扮演：</span>' + db.users.map(function (x) {
       return '<button type="button" class="role ' + (x.id === u.id ? 'on' : '') + '" data-act="erp-user" data-id="' + esc(x.id) + '">' + esc(x.name) + '（' + Rules.ROLE[x.role] + '）</button>';
     }).join('') + '</div>' +
-      '<p class="role-note">' + (boss ? '老闆：看得到成本與毛利，負責審核叫貨單。' : '業務：看不到成本，可以查庫存、叫貨、送出。') + '</p>';
+      '<p class="role-note">' + (boss ? '老闆：看得到成本與毛利，負責審核叫貨單、出貨、進貨，以及新增商品與改價。' : '業務：看不到成本，可以查庫存、叫貨、送出。') + '</p>';
 
     var flow = '<div class="flow">' + FLOW.map(function (f, i) {
-      return (i ? '<span class="ar">›</span>' : '') + '<span class="st' + (i === FLOW_BOSS ? ' boss' : '') + (hot.indexOf(i) >= 0 ? ' hot' : '') + '">' + f + '</span>';
+      return (i ? '<span class="ar">›</span>' : '') + '<span class="st' + (FLOW_BOSS.indexOf(i) >= 0 ? ' boss' : '') + (hot.indexOf(i) >= 0 ? ' hot' : '') + '">' + f + '</span>';
     }).join('') + '</div>';
 
     var tryit = details('不知道怎麼玩？照這個劇本試試看',
@@ -595,6 +602,8 @@ var App = (function () {
         '<li>選「阿明（業務）」，查 <b>205/55R16</b>，數量填 2，按「加入叫貨」，再按右邊的「送出叫貨單」。<span class="muted">→ 可用庫存會從 124 變成 122，因為送出就預留了。</span></li>' +
         '<li>選「小芳（業務）」，找 <b>225/45R17</b>（可用只有 1），叫 2 條並送出。<span class="muted">→ 被拒絕，因為庫存不夠。</span></li>' +
         '<li>選「王老闆（老闆）」，在右邊「待審核」按「核准」。<span class="muted">→ 庫存不變，因為預留早就建好了。</span></li>' +
+        '<li>核准之後，在右邊「待出貨」按「出貨完成」。<span class="muted">→ 在庫和預留各扣掉 2（130 → 128），可用庫存不變，訂單變成「已出貨」。</span></li>' +
+        '<li>想補貨？老闆在庫存表按「進貨」，在庫和可用都會增加；想賣新商品，按「＋新增商品」（剛建立時在庫是 0，要先進貨才能叫貨）。</li>' +
         '<li>想試「退回」或「拒絕」？它們會把預留的庫存還回去，可用數量會變多。</li>' +
         '<li>想看「兩位業務同時搶最後 1 條」？開兩個瀏覽器分頁，各扮演一位業務，同時送出 225/45R17 × 1，只有 1 人會成功。</li>' +
       '</ol>', !db.audit.length);
@@ -604,18 +613,19 @@ var App = (function () {
       return '<tr><td class="nowrap"><b>' + esc(r.spec) + '</b></td><td>' + esc(r.brand) + '<br><span class="small muted">' + esc(r.name) + '</span></td><td class="num">' + esc(r.year) + '</td>' +
         '<td class="num">' + r.on_hand + '</td><td class="num">' + r.reserved + '</td><td class="num"><b class="' + (zero ? 'zero' : '') + '">' + r.available + '</b></td>' +
         '<td class="num">' + fmtNum(r.price) + '</td>' +
-        (boss ? '<td class="num">' + fmtNum(r.cost) + '</td><td class="num">' + fmtNum(r.margin) + '</td>' :
+        (boss ? '<td class="num">' + fmtNum(r.cost) + '</td><td class="num">' + fmtNum(r.margin) + '</td>' +
+          '<td class="nowrap"><button type="button" class="link" data-act="receive" data-sku="' + esc(r.sku) + '">進貨</button>　<button type="button" class="link" data-act="edit-price" data-sku="' + esc(r.sku) + '">改價</button></td>' :
           '<td class="nowrap"><input class="qty" id="qty-' + esc(r.sku) + '" value="1" inputmode="numeric" aria-label="' + esc(r.spec) + ' 叫貨數量"> <button type="button" class="btn sm primary" data-act="add-line" data-sku="' + esc(r.sku) + '">加入叫貨</button></td>') +
         '</tr>';
     }).join('');
 
-    var stock = '<section class="card"><h2>查庫存 <span class="muted small">（' + (boss ? '老闆看得到成本' : '業務看不到成本') + '）</span></h2>' +
+    var stock = '<section class="card"><h2>查庫存 <span class="muted small">（' + (boss ? '老闆看得到成本' : '業務看不到成本') + '）</span>' + (boss ? ' <button type="button" class="btn sm" data-act="add-product">＋ 新增商品</button>' : '') + '</h2>' +
       '<form class="search" data-form="search"><input type="search" name="kw" value="' + esc(ui.erpQuery) + '" placeholder="輸入規格或品牌，例如 205/55R16" aria-label="查詢關鍵字"><button type="submit" class="btn primary">查詢</button>' +
       (ui.erpQuery ? '<button type="button" class="btn ghost" data-act="clear-search">看全部</button>' : '') + '</form>' +
       '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>規格</th><th>品牌／型號</th><th class="num">年份</th>' +
       '<th class="num" title="倉庫裡實際有幾條">在庫</th><th class="num" title="已被待審核或已核准的訂單佔用">預留</th><th class="num" title="在庫 − 預留，還能賣的數量">可用</th><th class="num">售價</th>' +
-      (boss ? '<th class="num">成本</th><th class="num">毛利</th>' : '<th>叫貨數量</th>') + '</tr></thead><tbody>' +
-      (stockRows || '<tr><td colspan="9" class="muted">查無資料</td></tr>') + '</tbody></table></div>' +
+      (boss ? '<th class="num">成本</th><th class="num">毛利</th><th>操作</th>' : '<th>叫貨數量</th>') + '</tr></thead><tbody>' +
+      (stockRows || '<tr><td colspan="10" class="muted">查無資料</td></tr>') + '</tbody></table></div>' +
       '<p class="hint"><b>可用 ＝ 在庫 － 預留。</b>業務一送出叫貨單，數量就會先預留，其他業務看到的「可用」會馬上變少，不會搶到同一批庫存。</p>' +
       (boss ? '' : '<p class="hint">想試試看？數量填 0、-1 或 1.5 再按「加入叫貨」，系統會擋下來。</p>') +
       details('技術細節：這次查詢回傳的欄位', '<p class="small"><code>' + esc(rows.length ? Object.keys(rows[0]).join(', ') : Rules.SALES_FIELDS.join(', ')) + '</code>' + (boss ? '' : '（沒有 cost，業務拿不到成本）') + '</p>') +
@@ -635,6 +645,19 @@ var App = (function () {
             '<button type="button" class="btn sm danger" data-act="reject-order" data-id="' + esc(o.id) + '">拒絕</button>'
         });
       }).join('');
+      var ship = ERP.view.shippable(db, u.id);
+      var shipHtml = ship.map(function (o) {
+        var body = '<table class="lines">' + o.lines.map(function (l) {
+          return '<tr><td>' + esc(l.label) + '</td><td class="right nowrap">× ' + l.qty + '</td></tr>';
+        }).join('') + '</table>';
+        return orderCard(o, {
+          body: body,
+          actions: '<button type="button" class="btn sm primary" data-act="ship" data-id="' + esc(o.id) + '">出貨完成</button>'
+        });
+      }).join('');
+      var rc = ERP.view.receipts(db, 5).map(function (r) {
+        return '<tr><td class="mono nowrap">' + esc(r.id) + '</td><td class="nowrap">' + fmtTime(r.at) + '</td><td>' + esc(ERP.view.spec(db, r.sku)) + '</td><td class="num">＋' + r.qty + '</td><td class="num">' + r.before + ' → ' + r.after + '</td></tr>';
+      }).join('');
       var all = ERP.view.orders(db, u.id).map(function (o) {
         return '<tr><td class="mono">' + esc(o.id) + '</td><td>' + userName(o.created_by) + '</td><td>' + esc(o.customer || '—') + '</td>' +
           '<td class="small">' + o.lines.map(function (l) { return esc(ERP.view.spec(db, l.sku)) + ' × ' + l.qty; }).join('、') + '</td>' +
@@ -643,6 +666,13 @@ var App = (function () {
       right = '<section class="card"><h2>待審核的叫貨單 <span class="pill orange">' + pend.length + '</span></h2>' +
           (pendHtml || '<p class="muted">目前沒有待審核的叫貨單。請先切到業務送出一張。</p>') +
           '<p class="hint">這些單子的庫存都已經預留好了。「核准」只改狀態；「退回」和「拒絕」會把預留的庫存還回去。</p>' +
+        '</section>' +
+        '<section class="card"><h2>待出貨的訂單 <span class="pill teal">' + ship.length + '</span></h2>' +
+          (shipHtml || '<p class="muted">目前沒有待出貨的訂單。老闆核准之後，訂單會出現在這裡。</p>') +
+          '<p class="hint">按「出貨完成」時，在庫與預留會各扣掉訂購數，所以「可用」不會變；訂單變成「已出貨」，不能再退回或重複出貨。</p>' +
+        '</section>' +
+        '<section class="card"><h2>最近的進貨單</h2>' +
+          (rc ? '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>進貨單</th><th>時間</th><th>商品</th><th class="num">數量</th><th class="num">在庫</th></tr></thead><tbody>' + rc + '</tbody></table></div>' : '<p class="muted">還沒有進貨紀錄。在左邊庫存表按「進貨」就會留下一張進貨單。</p>') +
         '</section>' +
         '<section class="card"><h2>全部訂單</h2><div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>單號</th><th>業務</th><th>客戶</th><th>品項</th><th>狀態</th><th></th></tr></thead><tbody>' +
           (all || '<tr><td colspan="6" class="muted">還沒有訂單</td></tr>') + '</tbody></table></div></section>';
@@ -1047,6 +1077,54 @@ var App = (function () {
         title: '退回 ' + id, ok: '退回',
         html: '<label>退回原因<input id="mReason" value="數量請再確認"></label><p class="hint">退回後，這張單預留的庫存會還回去；業務修改後可以重新送出。只有「待審核」的訂單可以退回。</p>',
         onOk: function (w) { act(function (cur) { return ERP.returnOrder(cur, ui.erpUser, id, w.querySelector('#mReason').value); }); }
+      });
+    },
+    ship: function (el) { act(function (cur) { return ERP.shipOrder(cur, ui.erpUser, el.dataset.id); }); },
+    receive: function (el) {
+      modal({
+        title: '進貨', ok: '確定進貨',
+        html: '<label>要進貨的商品<select id="mSku">' + productOptions(el.dataset.sku) + '</select></label>' +
+          '<label>進貨數量（條）<input id="mQty" value="10" inputmode="numeric"></label>' +
+          '<label>備註（選填）<input id="mNote" placeholder="例如：供應商、到貨日"></label>' +
+          '<p class="hint">進貨後，這個商品的「在庫」會增加，「可用」也跟著增加，並留下一張進貨單。數量只能填正整數。</p>',
+        onOk: function (w) {
+          var sku = w.querySelector('#mSku').value, qty = w.querySelector('#mQty').value, note = w.querySelector('#mNote').value;
+          act(function (cur) { return ERP.receiveStock(cur, ui.erpUser, sku, qty, note); });
+        }
+      });
+    },
+    'add-product': function () {
+      modal({
+        title: '新增商品', ok: '新增',
+        html: '<label>品牌<input id="mBrand" placeholder="例如：米其林"></label>' +
+          '<label>型號（選填）<input id="mName" placeholder="例如：Primacy 4"></label>' +
+          '<label>規格<input id="mSpec" placeholder="例如：205/55R16"></label>' +
+          '<label>年份<input id="mYear" value="' + new Date().getFullYear() + '" inputmode="numeric"></label>' +
+          '<label>售價<input id="mPrice" inputmode="decimal"></label>' +
+          '<label>成本（業務看不到）<input id="mCost" inputmode="decimal"></label>' +
+          '<p class="hint">新商品剛建立時，在庫是 0；要先按「進貨」，業務才叫得到貨。品牌、型號、規格、年份都相同的商品不能重複新增。</p>',
+        onOk: function (w) {
+          var f = {
+            brand: w.querySelector('#mBrand').value, name: w.querySelector('#mName').value, spec: w.querySelector('#mSpec').value,
+            year: w.querySelector('#mYear').value, price: w.querySelector('#mPrice').value, cost: w.querySelector('#mCost').value
+          };
+          act(function (cur) { return ERP.addProduct(cur, ui.erpUser, f); });
+        }
+      });
+    },
+    'edit-price': function (el) {
+      var sku = el.dataset.sku;
+      var p = db.products.filter(function (x) { return x.sku === sku; })[0];
+      if (!p) return;
+      modal({
+        title: '改價：' + p.spec + ' ' + p.brand, ok: '儲存',
+        html: '<label>售價<input id="mPrice" value="' + esc(p.price) + '" inputmode="decimal"></label>' +
+          '<label>成本（業務看不到）<input id="mCost" value="' + esc(p.cost) + '" inputmode="decimal"></label>' +
+          '<p class="hint">已經送出的訂單不受影響。售價要大於 0，成本不能是負數。</p>',
+        onOk: function (w) {
+          var f = { price: w.querySelector('#mPrice').value, cost: w.querySelector('#mCost').value };
+          act(function (cur) { return ERP.updateProduct(cur, ui.erpUser, sku, f); });
+        }
       });
     },
     'reject-order': function (el) {

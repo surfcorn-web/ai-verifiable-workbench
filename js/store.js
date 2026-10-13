@@ -21,8 +21,8 @@ var Store = (function () {
   }
 
   // ---------- 舊資料升級 ----------
-  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）；3：加入參考 ERP 案例的候選需求
-  var DATA_VERSION = 4;
+  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）；3：加入參考 ERP 案例的候選需求；4：寄庫採購買當下就扣庫存；5：Sprint 1 進出貨與商品管理
+  var DATA_VERSION = 5;
 
   function prodOf(s, sku) { return s.products.filter(function (p) { return p.sku === sku; })[0]; }
 
@@ -42,12 +42,13 @@ var Store = (function () {
     if (v < 2) migrateToV2(s);
     if (v < 3) migrateToV3(s);
     if (v < 4) migrateToV4(s);
+    if (v < 5) migrateToV5(s);
     s.meta.data_version = DATA_VERSION;
     return s;
   }
 
-  // v4：寄庫決定採用「購買當下就扣庫存」。沒被人改過的需求文字、規則用新版更新，並拿掉已經決定的舊疑問
-  function migrateToV4(s) {
+  // 沒被人改過的需求文字、規則內容，用程式內最新版更新（人改過的不動）
+  function refreshUnedited(s) {
     s.wb.requirements.forEach(function (r) {
       var c = Rules.REQ_CATALOG[r.id];
       if (!c || r.edited) return;
@@ -58,7 +59,31 @@ var Store = (function () {
       var t = r.edited_at ? null : Rules.RULE_TEMPLATES.filter(function (x) { return x.id === r.id; })[0];
       return t ? fromTemplate(t, r) : r;
     });
+  }
+
+  // v4：寄庫決定採用「購買當下就扣庫存」。更新需求與規則，並拿掉已經決定的舊疑問
+  function migrateToV4(s) {
+    refreshUnedited(s);
     s.wb.interview.questions = s.wb.interview.questions.filter(function (q) { return q.text.indexOf('寄庫的輪胎，購買當下') < 0; });
+  }
+
+  // v5：Sprint 1 進出貨與商品管理。補進貨單清單與編號、更新規則，問答已完成的專案補上兩條 AI 建議，拿掉已有定義的「出貨」疑問
+  function migrateToV5(s) {
+    s.receipts = s.receipts || [];
+    s.seq.receipt = s.seq.receipt || (s.receipts.length + 1);
+    s.seq.product = s.seq.product || (s.products.reduce(function (m, p) { var x = /^TR-(\d+)$/.exec(p.sku); return x ? Math.max(m, Number(x[1])) : m; }, 0) + 1);
+    refreshUnedited(s);
+    s.wb.interview.questions = s.wb.interview.questions.filter(function (q) { return q.text.indexOf('還要不要有「出貨」這一步') < 0; });
+    if (s.wb.interview.step < Rules.DONE_STEP) return;
+    ['REQ-024', 'REQ-025'].forEach(function (id) {
+      if (s.wb.requirements.some(function (r) { return r.id === id; })) return;
+      var c = Rules.REQ_CATALOG[id];
+      s.wb.requirements.push({
+        id: id, text: c.text, priority: c.priority, quality: c.quality.slice(), group: '',
+        status: 'ai', source: 'AI 流程走查（升級補充）', evidence: 'AI 依 ERP 難點檢核清單推論（沒有使用者原話）', note: '', edited: false,
+        history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充（Sprint 1）' }]
+      });
+    });
   }
 
   // v3：問答已完成的專案，補上「參考 ERP 案例」的候選需求（AI 建議，不影響已做的決定）

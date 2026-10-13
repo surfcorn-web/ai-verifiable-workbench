@@ -27,7 +27,9 @@ var Rules = (function () {
     SUBMITTED: '送出並預留', SUBMIT_DENIED: '送出被拒',
     APPROVED: '老闆核准', APPROVE_DENIED: '核准被拒',
     REJECTED: '老闆拒絕', REJECT_DENIED: '拒絕被拒',
-    RETURNED: '老闆退回', RETURN_DENIED: '退回被拒', MIGRATED: '資料升級'
+    RETURNED: '老闆退回', RETURN_DENIED: '退回被拒', MIGRATED: '資料升級',
+    SHIPPED: '出貨完成', SHIP_DENIED: '出貨被拒', RECEIVED: '進貨入庫', RECEIVE_DENIED: '進貨被拒',
+    PRODUCT_ADDED: '新增商品', PRODUCT_UPDATED: '修改價格', PRODUCT_DENIED: '商品異動被拒'
   };
 
   // 需求狀態可由「人」改成哪些狀態；值是依序執行的單步操作（已確認／延後／拒絕要先撤回再改）
@@ -78,6 +80,8 @@ var Rules = (function () {
   function canReturn(order) { return !!order && order.status === 'SUBMITTED'; }
   function canApprove(order) { return !!order && order.status === 'SUBMITTED'; }
   function canReject(order) { return !!order && order.status === 'SUBMITTED'; }
+  // RULE-010 出貨完成：只處理已核准的訂單
+  function canShip(order) { return !!order && order.status === 'APPROVED'; }
   function canEdit(order) { return !!order && (order.status === 'DRAFT' || order.status === 'RETURNED'); }
 
   // =====================================================================
@@ -148,11 +152,14 @@ var Rules = (function () {
     'REQ-016': { text: '庫存依生產週碼批次分開記錄，並顯示庫齡', priority: 'Should', quality: [2, 2, 1, 2, 1, 1, 2] },
     'REQ-017': { text: '訂單每個品項分開記錄：訂購數、當次出貨數、客戶寄庫數', priority: 'Should', quality: [2, 2, 1, 2, 1, 2, 2] },
     'REQ-018': { text: '已出貨的訂單可取消出貨，庫存依原批次復原', priority: 'Should', quality: [2, 2, 2, 1, 1, 1, 2] },
-    'REQ-019': { text: '進貨入庫：選商品、倉別、生產週碼與數量，並留下進貨單號', priority: 'Should', quality: [2, 2, 1, 2, 1, 1, 2] },
+    'REQ-019': { text: '進貨入庫：老闆選商品與數量，在庫增加並留下進貨單號（本版先不分倉別與批次）', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2] },
     'REQ-020': { text: '庫存校正：以實際盤點數為準，留下校正紀錄，可取消並回復', priority: 'Should', quality: [2, 2, 1, 2, 1, 1, 2] },
     'REQ-021': { text: '可新增倉別，並在倉庫之間移動可用庫存（預留與寄庫的不可移）', priority: 'Should', quality: [2, 2, 1, 2, 2, 1, 2] },
     'REQ-022': { text: '實際售價預設為牌價打 9 折，業務可依該筆交易修改', priority: 'Should', quality: [2, 2, 2, 2, 1, 1, 2] },
-    'REQ-023': { text: 'Excel 批次更新與備份還原：更新前先比對差異', priority: "Won't", quality: [2, 2, 1, 1, 2, 1, 2] }
+    'REQ-023': { text: 'Excel 批次更新與備份還原：更新前先比對差異', priority: "Won't", quality: [2, 2, 1, 1, 2, 1, 2] },
+    // Sprint 1 商品＋進出貨（簡報第 11 頁）：AI 流程走查提出，由人決定
+    'REQ-024': { text: '老闆可對已核准的訂單按「出貨完成」：在庫與預留一起扣掉，訂單變「已出貨」', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2] },
+    'REQ-025': { text: '老闆可新增商品、修改售價與成本；業務看不到成本', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 1] }
   };
   var REQ_ORDER = Object.keys(REQ_CATALOG);
 
@@ -320,7 +327,40 @@ var Rules = (function () {
     }),
     tpl({
       id: 'RULE-021', title: '進貨入庫', primary: 'REQ-019', reqs: ['REQ-019'], difficulty: '盤點與校正',
-      if: '進貨數量是正整數，且已選好倉別與生產週碼', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
+      if: '進貨數量是大於 0 的整數，操作的人是老闆，而且商品存在',
+      t: { action: '進貨：在庫增加，並留下進貨單號', effect: '在庫增加進貨數量；預留不變，所以可用庫存跟著增加', message: '進貨完成：商品 ＋N 條（進貨單 RC-xxxx）', audit: '記下誰、哪個商品、進貨幾條、進貨單號', tests: ['TC-021-01'], final: '在庫已增加，進貨單已留存' },
+      f: { action: '拒絕進貨', effect: '庫存與進貨單完全不變', message: '進貨數量必須為正整數／只有老闆可以進貨', audit: '記下被拒絕的進貨與原因', tests: ['TC-021-02'], final: '庫存不變、沒有進貨單' },
+      edge: { text: '同一個商品連續進貨，在庫逐次累加，進貨單號依序不重複', tests: ['TC-021-03'] },
+      code: ['ERP.receiveStock'],
+      tasks: [
+        '實作 ERP.receiveStock(db, userId, sku, qty, note)：只有老闆；數量用 Rules.isPositiveInt 檢查',
+        '成功：on_hand += qty、寫進貨單（RC-0001 起依序編號）、稽核 RECEIVED；失敗：資料完全不變、稽核 RECEIVE_DENIED'
+      ]
+    }),
+    tpl({
+      id: 'RULE-010', title: '出貨完成：在庫與預留一起扣掉', primary: 'REQ-024', reqs: ['REQ-024'], difficulty: '單據狀態與回滾',
+      if: '訂單目前是「已核准」，而且操作的人是老闆',
+      t: { action: '出貨完成；訂單變成「已出貨」', effect: '在庫和預留各扣掉訂購條數（預留被用掉）；可用庫存不變', message: '出貨完成（在庫 130 → 128），預留已用掉', audit: '記下誰出貨了哪張單、各品項在庫變化', tests: ['TC-010-01'], final: '已出貨' },
+      f: { action: '不能出貨（不是老闆，或訂單不是已核准）', effect: '訂單與庫存完全不變', message: '只有已核准的訂單可以出貨', audit: '記下被拒絕的出貨與原因', tests: ['TC-010-02'], final: '維持原本的狀態' },
+      edge: { text: '同一張單不能重複出貨，否則在庫會被扣兩次', tests: ['TC-010-03'] },
+      code: ['ERP.shipOrder', 'Rules.canShip'],
+      tasks: [
+        '實作 ERP.shipOrder(db, userId, orderId)：只有老闆、只處理 APPROVED；每個品項 on_hand −= qty 且 reserved −= qty',
+        '狀態改 SHIPPED；稽核 SHIPPED；任何一項在庫或預留不足就整張不出貨（SHIP_DENIED），資料完全不變'
+      ]
+    }),
+    tpl({
+      id: 'RULE-011', title: '老闆新增商品、修改售價與成本', primary: 'REQ-025', reqs: ['REQ-025'], difficulty: '權限與敏感資料',
+      if: '操作的人是老闆，品牌與規格有填，年份是 4 位數，售價大於 0、成本不是負數，而且不是已經有的商品',
+      t: { action: '新增商品（在庫從 0 開始），或更新售價與成本', effect: '商品清單多一筆（或價格改變）；其他商品與庫存不變', message: '已新增商品 TR-009（在庫 0，要進貨才有庫存）', audit: '記下新增或改價的人、商品、改前改後的數字', tests: ['TC-011-01'], final: '商品已建立或價格已更新' },
+      f: { action: '拒絕新增或修改', effect: '商品清單與價格完全不變', message: '只有老闆可以新增商品／品牌和規格一定要填／售價要大於 0', audit: '記下被拒絕的操作與原因', tests: ['TC-011-02'], final: '商品清單不變' },
+      edge: { text: '品牌、型號、規格、年份都相同的商品不可重複新增；商品編號依序不跳號', tests: ['TC-011-03'] },
+      code: ['ERP.addProduct', 'ERP.updateProduct'],
+      tasks: [
+        '實作 ERP.addProduct(db, userId, fields)：只有老闆；檢查必填、年份、價格、不重複；編號為現有最大編號 ＋ 1',
+        '實作 ERP.updateProduct(db, userId, sku, { price, cost })：只有老闆；價格要大於 0；沒有變動也算拒絕',
+        '業務查詢結果仍不可含 cost（RULE-001）'
+      ]
     }),
     tpl({
       id: 'RULE-022', title: '庫存校正（以實際盤點為準）', primary: 'REQ-020', reqs: ['REQ-020'], difficulty: '盤點與校正',
@@ -361,7 +401,7 @@ var Rules = (function () {
     { from: 'SUBMITTED', to: 'REJECTED', cond: '老闆拒絕 → 釋放預留', rule: 'RULE-007', v1: true },
     { from: 'SUBMITTED', to: 'RETURNED', cond: '老闆退回 → 釋放預留，業務可修改', rule: 'RULE-005', v1: true },
     { from: 'RETURNED', to: 'SUBMITTED', cond: '業務修改後重送（再檢查庫存並預留）', rule: 'RULE-003', v1: true },
-    { from: 'APPROVED', to: 'SHIPPED', cond: '全部出貨 → 預留與在庫一起扣掉', rule: '—', v1: false },
+    { from: 'APPROVED', to: 'SHIPPED', cond: '老闆按「出貨完成」→ 在庫與預留一起扣掉', rule: 'RULE-010', v1: true },
     { from: 'APPROVED', to: 'PARTIALLY_SHIPPED', cond: '部分出貨 → 只扣出貨的部分', rule: 'RULE-009', v1: false },
     { from: 'PARTIALLY_SHIPPED', to: 'SHIPPED', cond: '出完剩餘', rule: '—', v1: false },
     { from: 'APPROVED', to: 'CANCELLED', cond: '取消 → 釋放預留', rule: 'RULE-008', v1: false },
@@ -501,13 +541,14 @@ var Rules = (function () {
         add('REQ-012', 'ai', '', 'AI 角色推演（財務）', inferred);
         add('REQ-013', 'ai', '', 'AI 參考模型', inferred);
         add('REQ-015', 'ai', '', 'AI 參考模型', inferred);
+        add('REQ-024', 'ai', '核准之後要有「出貨完成」這一步，在庫才會真正減少', 'AI 流程走查', inferred);
+        add('REQ-025', 'ai', '', 'AI 流程走查', inferred);
         REF_CANDIDATES.forEach(function (id) { add(id, 'ai', '', REF_SOURCE, REF_EVIDENCE[id]); });
         var early = wb.requirements.some(function (r) { return r.id === 'REQ-004B' && r.status === 'pending'; });
         qs.push('老闆退回或拒絕時，預留要不要釋放？' + (early ? '（送出就預留 → AI 建議：要釋放，否則庫存會被卡住）' : '（核准才預留 → 退回時還沒預留，AI 建議：不用釋放）'));
         qs.push('低庫存是「小於」還是「小於或等於」安全庫存？');
         qs.push(early ? '兩位業務同時送出同一批最後庫存怎麼辦？（AI 建議：送出時重新查庫存，只讓 1 人成功）' : '兩位老闆同時核准同一批最後庫存怎麼辦？（AI 建議：核准時重新查庫存，只讓 1 張成功）');
         qs.push('庫存要不要分「生產週碼批次」記錄？（參考 ERP：每筆庫存都分批次，才算得出庫齡，取消出貨時也才能還原到原批次）');
-        qs.push('核准之後，還要不要有「出貨」這一步來真正扣掉在庫？（參考 ERP：出貨完成時才扣，並且可以取消出貨）');
         var total = wb.requirements.length + adds.length;
         ai = '整理完成，目前共 **' + total + ' 條需求草稿**。我另外依「ERP 難點檢核清單」，以及一套真實運作中的輪胎 ERP（旺盛輪業）的功能，想到幾項您沒有提到的需求（標示「AI 建議」），例如：已核准訂單取消時釋放預留、庫存分批次與庫齡、客戶寄庫、進貨與庫存校正。\n**AI 只能提議，不能把需求改成「已確認」**，請到「確認需求」逐條決定。';
         break;
@@ -579,7 +620,9 @@ var Rules = (function () {
     S.push('', '## 4. 資料定義', '');
     S.push('- `available = on_hand − reserved`');
     S.push('- 預留時機：' + (early ? '業務送出時（REQ-004B）；退回、拒絕時釋放；核准不改庫存' : late ? '老闆核准時（REQ-004）；送出不預留' : '（尚未決定）'));
-    S.push('- 訂單狀態：DRAFT → SUBMITTED → APPROVED／REJECTED；SUBMITTED → RETURNED → SUBMITTED');
+    S.push('- 訂單狀態：DRAFT → SUBMITTED → APPROVED／REJECTED；SUBMITTED → RETURNED → SUBMITTED' + (confirmed.some(function (r) { return r.id === 'REQ-024'; }) ? '；APPROVED → SHIPPED' : ''));
+    if (confirmed.some(function (r) { return r.id === 'REQ-024'; })) S.push('- 出貨（RULE-010）：老闆按「出貨完成」時，在庫與預留各扣訂購數，可用庫存不變；不可重複出貨');
+    if (confirmed.some(function (r) { return r.id === 'REQ-019'; })) S.push('- 進貨（RULE-021）：老闆進貨使在庫增加並留下進貨單號（RC-0001 起依序）');
     S.push('- 角色：sales（業務）、boss（老闆）', '');
     S.push('## 5. IF 閉環規則（可進入開發）', '');
     parts.ready.forEach(function (r) {
@@ -689,7 +732,7 @@ var Rules = (function () {
     PRIORITY_LABEL: PRIORITY_LABEL, ACTION_LABEL: ACTION_LABEL,
     available: available, parseQty: parseQty, isPositiveInt: isPositiveInt,
     isSales: isSales, isBoss: isBoss, SALES_FIELDS: SALES_FIELDS, viewFor: viewFor,
-    RESERVING: RESERVING, canReturn: canReturn, canApprove: canApprove, canReject: canReject, canEdit: canEdit,
+    RESERVING: RESERVING, canReturn: canReturn, canApprove: canApprove, canReject: canReject, canShip: canShip, canEdit: canEdit,
     CLOSURE: CLOSURE, check: check, testIds: testIds, parseTestIds: parseTestIds,
     QUALITY: QUALITY, REQ_CATALOG: REQ_CATALOG, REQ_ORDER: REQ_ORDER, qualityScore: qualityScore,
     REF_SOURCE: REF_SOURCE, REF_EVIDENCE: REF_EVIDENCE, REF_CANDIDATES: REF_CANDIDATES,

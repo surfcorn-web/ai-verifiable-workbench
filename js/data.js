@@ -1,7 +1,7 @@
 /* data.js — SEED：系統初始資料（「重設資料」會回到這裡）
  * 全域物件：SEED
  * 庫存規則：available = on_hand − reserved；reserved 在業務「送出時」增加（REQ-004B 送出即預留），
- * 退回、拒絕時釋放，核准不再改庫存。
+ * 退回、拒絕時釋放，核准不再改庫存；老闆按「出貨完成」時，在庫與預留一起扣掉；進貨會增加在庫。
  * 種子資料的不變式：每個品項 reserved = 所有 SUBMITTED 與 APPROVED 訂單該品項數量合計。
  */
 var SEED = {
@@ -9,8 +9,8 @@ var SEED = {
     schema: 'aiwb_state_v01',
     app: 'AI 可驗證開發工作台',
     version: 'v0.1.0',
-    data_version: 4, // 4：送出即預留＋參考 ERP 候選需求＋寄庫採購買當下就扣庫存（舊資料載入時由 Store 自動升級）
-    build: '2026-10-13.9' // 程式版本標記：畫面左下角會顯示，用來確認瀏覽器載入的是最新檔案
+    data_version: 5, // 5：Sprint 1 進出貨與商品管理（舊資料載入時由 Store 自動升級）
+    build: '2026-10-13.11' // 程式版本標記：畫面左下角會顯示，用來確認瀏覽器載入的是最新檔案
   },
 
   // ---------- ERP：輪胎批發 ----------
@@ -78,8 +78,9 @@ var SEED = {
     }
   ],
 
+  receipts: [], // 進貨單（進貨入庫會留下單號 RC-0001…）
   audit: [],
-  seq: { order: 5, audit: 1, source: 3 },
+  seq: { order: 5, audit: 1, source: 3, receipt: 1, product: 9 },
 
   // ---------- 工作台 ----------
   wb: {

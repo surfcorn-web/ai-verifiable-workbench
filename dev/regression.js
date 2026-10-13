@@ -170,7 +170,11 @@ check('約定', '每個 ERP 動作（成功、失敗）都回傳 {ok,message,sta
     ['submitOrder', a.state, ['U01', id]], ['submitOrder', SEED, ['U01', 'SO-0001']], ['submitOrder', cart(SEED, 'U01', 'TR-002', 2).state, ['U01', 'SO-0005']],
     ['approveOrder', sb.state, ['U03', id]], ['approveOrder', sb.state, ['U01', id]], ['approveOrder', SEED, ['U03', 'NOPE']],
     ['rejectOrder', sb.state, ['U03', id, 'r']], ['rejectOrder', sb.state, ['U01', id, 'r']], ['rejectOrder', SEED, ['U03', 'SO-0001', 'r']],
-    ['returnOrder', sb.state, ['U03', id, 'r']], ['returnOrder', SEED, ['U03', 'SO-0001', 'r']]
+    ['returnOrder', sb.state, ['U03', id, 'r']], ['returnOrder', SEED, ['U03', 'SO-0001', 'r']],
+    ['shipOrder', SEED, ['U03', 'SO-0001']], ['shipOrder', SEED, ['U01', 'SO-0001']], ['shipOrder', SEED, ['U03', 'SO-0004']], ['shipOrder', SEED, ['U03', 'NOPE']],
+    ['receiveStock', SEED, ['U03', 'TR-001', 5, 'x']], ['receiveStock', SEED, ['U03', 'TR-001', 0]], ['receiveStock', SEED, ['U01', 'TR-001', 5]], ['receiveStock', SEED, ['U03', 'NOPE', 5]],
+    ['addProduct', SEED, ['U03', { brand: 'B', name: 'N', spec: '1/1R1', year: 2025, cost: 1, price: 2 }]], ['addProduct', SEED, ['U01', { brand: 'B', spec: 'S', year: 2025, cost: 1, price: 2 }]], ['addProduct', SEED, ['U03', {}]],
+    ['updateProduct', SEED, ['U03', 'TR-001', { price: 3400 }]], ['updateProduct', SEED, ['U01', 'TR-001', { price: 3400 }]], ['updateProduct', SEED, ['U03', 'NOPE', { price: 1 }]]
   ];
   for (const [fn, db, args] of calls) {
     const before = JSON.stringify(db);
@@ -183,38 +187,47 @@ check('約定', '每個 ERP 動作（成功、失敗）都回傳 {ok,message,sta
 });
 
 // ---------- 隨機操作 3000 次 ----------
-check('隨機', '3000 次隨機操作：不變式、在庫不變、狀態轉換合法、業務永遠看不到成本', () => {
+check('隨機', '3000 次隨機操作（含進貨、出貨、新增商品）：不變式、在庫守恆、狀態轉換合法、業務永遠看不到成本', () => {
   let seed = 20261013; const rnd = n => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return Math.floor(((t ^ t >>> 14) >>> 0) / 4294967296 * n); };
   const users = ['U01', 'U02', 'U03', 'U04', 'U99'];
   const skus = SEED.products.map(p => p.sku).concat(['NOPE']);
   const qtys = [1, 1, 2, 3, 5, 10, 50, 0, -1, 1.5, '2', 'x'];
-  const allowed = new Set(['null>DRAFT', 'DRAFT>SUBMITTED', 'SUBMITTED>APPROVED', 'SUBMITTED>REJECTED', 'SUBMITTED>RETURNED', 'RETURNED>SUBMITTED']);
-  const onHand = JSON.stringify(SEED.products.map(p => p.on_hand));
+  const allowed = new Set(['null>DRAFT', 'DRAFT>SUBMITTED', 'SUBMITTED>APPROVED', 'SUBMITTED>REJECTED', 'SUBMITTED>RETURNED', 'RETURNED>SUBMITTED', 'APPROVED>SHIPPED']);
+  const baseOnHand = sku => { const p = SEED.products.find(x => x.sku === sku); return p ? p.on_hand : 0; };
+  const newProducts = [{ brand: 'A', name: 'a', spec: '1/1R1', year: 2025, cost: 10, price: 20 }, { brand: 'B', name: 'b', spec: '2/2R2', year: 2024, cost: 5, price: 9 }, { brand: '', spec: '', year: 'x', cost: -1, price: 0 }];
   let db = clone(SEED); const tally = {};
   const pickBy = st => { const xs = db.orders.filter(o => st.includes(o.status)); return xs.length ? xs[rnd(xs.length)] : null; };
+  const known = () => db.products.map(p => p.sku).concat(['NOPE']);
   for (let i = 0; i < 3000; i++) {
     const ids = db.orders.map(o => o.id).concat(['NOPE']);
     let u = users[rnd(users.length)], sku = skus[rnd(skus.length)], q = qtys[rnd(qtys.length)], oid = ids[rnd(ids.length)];
     if (rnd(10) < 7) {
-      const t = rnd(2) ? pickBy(['DRAFT', 'RETURNED']) : pickBy(['SUBMITTED']);
-      if (t) { oid = t.id; u = t.status === 'SUBMITTED' ? (rnd(2) ? 'U03' : 'U04') : t.created_by; if (t.lines.length && rnd(2)) sku = t.lines[0].sku; }
+      const t = rnd(3) === 0 ? pickBy(['APPROVED']) : rnd(2) ? pickBy(['DRAFT', 'RETURNED']) : pickBy(['SUBMITTED']);
+      if (t) { oid = t.id; u = (t.status === 'SUBMITTED' || t.status === 'APPROVED') ? (rnd(2) ? 'U03' : 'U04') : t.created_by; if (t.lines.length && rnd(2)) sku = t.lines[0].sku; }
     }
     const ops = [() => ERP.addLine(db, u, sku, q), () => ERP.updateLine(db, u, oid, sku, q), () => ERP.removeLine(db, u, oid, sku),
       () => ERP.submitOrder(db, u, oid), () => ERP.submitOrder(db, u, oid), () => ERP.approveOrder(db, u, oid), () => ERP.rejectOrder(db, u, oid, 'r'),
-      () => ERP.returnOrder(db, u, oid, 'r'), () => ERP.queryStock(db, u, '')];
+      () => ERP.returnOrder(db, u, oid, 'r'), () => ERP.queryStock(db, u, ''),
+      () => ERP.shipOrder(db, u, oid), () => ERP.shipOrder(db, u, oid), () => ERP.receiveStock(db, u, known()[rnd(known().length)], q),
+      () => ERP.addProduct(db, u, newProducts[rnd(newProducts.length)]), () => ERP.updateProduct(db, u, known()[rnd(known().length)], { price: q })];
     const k = rnd(ops.length); const r = ops[k]();
     tally[r.ok] = (tally[r.ok] || 0) + 1;
     assert(r.state.audit.length === db.audit.length + 1, '第 ' + i + ' 次沒有寫 audit');
     db = r.state;
     const inv = ERP.view.invariants(db); assert(!inv.length, '第 ' + i + ' 次：' + inv.join('；'));
-    assert(JSON.stringify(db.products.map(p => p.on_hand)) === onHand, '在庫被改動');
+    // 在庫守恆：在庫 ＝ 種子在庫 ＋ 進貨總數 － 已出貨總數（每個品項）
+    for (const p of db.products) {
+      const rc = (db.receipts || []).filter(x => x.sku === p.sku).reduce((a, x) => a + x.qty, 0);
+      const sh = db.orders.filter(o => o.status === 'SHIPPED').reduce((a, o) => a + o.lines.filter(l => l.sku === p.sku).reduce((b, l) => b + l.qty, 0), 0);
+      assert(p.on_hand === baseOnHand(p.sku) + rc - sh, '第 ' + i + ' 次 ' + p.sku + ' 在庫不守恆：' + p.on_hand + ' ≠ ' + baseOnHand(p.sku) + ' + ' + rc + ' − ' + sh);
+    }
     if (k === 8 && (u === 'U01' || u === 'U02')) r.data.forEach(row => assert(!('cost' in row), '業務看到成本'));
   }
   const seen = {};
   for (const o of db.orders) for (const h of o.history) { const k = h.from + '>' + h.to; assert(allowed.has(k), o.id + ' 非法轉換 ' + k); seen[k] = (seen[k] || 0) + 1; }
   assert(Object.keys(seen).length === allowed.size, '有轉換沒被走到：' + JSON.stringify(seen));
   const st = {}; db.orders.forEach(o => st[o.status] = (st[o.status] || 0) + 1);
-  return '成功 ' + (tally.true || 0) + '、拒絕 ' + (tally.false || 0) + '；' + db.orders.length + ' 張訂單 ' + JSON.stringify(st) + '；6 種轉換都走到；可用歸零 ' + db.products.filter(p => p.on_hand === p.reserved).map(p => p.sku).join(',');
+  return '成功 ' + (tally.true || 0) + '、拒絕 ' + (tally.false || 0) + '；' + db.orders.length + ' 張訂單 ' + JSON.stringify(st) + '；7 種轉換都走到；商品 ' + db.products.length + ' 個、進貨單 ' + (db.receipts || []).length + ' 張；可用歸零 ' + db.products.filter(p => p.on_hand === p.reserved).map(p => p.sku).join(',');
 });
 
 // ---------- 舊資料升級（v1 核准才預留 → v2 送出即預留） ----------
@@ -233,7 +246,7 @@ check('升級', '舊資料載入：待審核單補上預留；庫存不夠的自
   s.wb.requirements = [{ id: 'REQ-004B', text: '舊文字', priority: 'Must', quality: [0, 0, 0, 0, 0, 0, 0], group: 'reserve-timing', status: 'pending', source: 's', evidence: 'e', note: '', edited: false, history: [] }];
   mem['aiwb_state_v01'] = JSON.stringify(s);
   const m = Store.load();
-  assert(m.meta.data_version === 4, 'data_version');
+  assert(m.meta.data_version === 5, 'data_version');
   assert(ERP.view.invariants(m).length === 0, ERP.view.invariants(m).join('；'));
   assert(m.orders.find(o => o.id === 'SO-0004').status === 'SUBMITTED' && prod(m, 'TR-003').reserved === 8, 'SO-0004 沒補上預留');
   const sa = m.orders.find(o => o.id === ida).status, sb = m.orders.find(o => o.id === idb).status;
@@ -265,11 +278,11 @@ const W = walk(false);
 check('訪談', 'AI 第 2 輪問出「送出時就預留，還是老闆核准時才預留」', () => {
   const t = W.wb.interview.messages.filter(m => m.who === 'ai')[1].text; assert(/送出時/.test(t) && /老闆核准時/.test(t), t);
 });
-check('訪談', '預設建議回答（送出就預留）→ REQ-004B 待確認、REQ-004 AI 建議；尚待釐清 5 項（含 2 條參考 ERP 追問；寄庫已決定不再問）', () => {
+check('訪談', '預設建議回答（送出就預留）→ REQ-004B 待確認、REQ-004 AI 建議；尚待釐清 4 項（含 1 條參考 ERP 追問；寄庫與出貨已有決定，不再問）', () => {
   const st = id => (W.wb.requirements.find(r => r.id === id) || {}).status;
   assert(st('REQ-004B') === 'pending' && st('REQ-004') === 'ai', st('REQ-004B') + '/' + st('REQ-004'));
-  assert(W.wb.interview.questions.length === 5 && W.wb.interview.step === Rules.DONE_STEP, 'questions ' + W.wb.interview.questions.length);
-  assert(W.wb.interview.questions.some(q => /生產週碼批次/.test(q.text)) && W.wb.interview.questions.some(q => /出貨/.test(q.text)), '缺參考 ERP 追問'); assert(!W.wb.interview.questions.some(q => /寄庫的輪胎/.test(q.text)), '寄庫已決定，不該再問');
+  assert(W.wb.interview.questions.length === 4 && W.wb.interview.step === Rules.DONE_STEP, 'questions ' + W.wb.interview.questions.length);
+  assert(W.wb.interview.questions.some(q => /生產週碼批次/.test(q.text)), '缺參考 ERP 追問'); assert(!W.wb.interview.questions.some(q => /還要不要有「出貨」這一步/.test(q.text)), '出貨已有定義，不該再問'); assert(!W.wb.interview.questions.some(q => /寄庫的輪胎/.test(q.text)), '寄庫已決定，不該再問');
   assert(/送出就預留 → AI 建議：要釋放/.test(W.wb.interview.questions[0].text), W.wb.interview.questions[0].text);
   assert(st('REQ-010') === 'ai', 'REQ-010');
   return W.wb.requirements.length + ' 條需求草稿';
@@ -347,10 +360,11 @@ check('參考ERP', '8 條參考 ERP 候選需求：AI 建議、來源與依據�
   for (const id of ['REQ-008','REQ-010']) x = Store.wb.setReqStatus(x, id, 'adopt').state;
   for (const r of x.wb.requirements.filter(r => r.status === 'ai')) x = Store.wb.setReqStatus(x, r.id, 'defer').state;
   const b = Store.wb.buildRules(x); assert(b.ok, b.message); x = b.state;
-  const stubs = ['RULE-018','RULE-019','RULE-020','RULE-021','RULE-022','RULE-023','RULE-024','RULE-025'];
+  const stubs = ['RULE-018','RULE-019','RULE-020','RULE-022','RULE-023','RULE-024','RULE-025'];
   for (const id of stubs) { const r = x.wb.rules.find(y => y.id === id); assert(r, id + ' 沒建立'); const c = Rules.check(r); assert(!c.complete && c.score <= 2, id + ' ' + c.score); }
   const pack = Rules.devpack(Store.wb.genDevpack(x).state); assert(stubs.every(id => pack.blocked.includes(id)) && stubs.every(id => !pack.ready.includes(id)), '草稿規則不該進開發包');
   assert(Rules.RRB.filter(y => y.ref).length === 5, 'RRB 參考 ERP 有看到 5 項');
+  assert(pack.ready.includes('RULE-021'), 'REQ-019 採納後，RULE-021（進貨入庫）已寫完整且有驗收案例，應該進開發包');
 });
 check('寄庫', '寄庫決定：購買當下就扣庫存——需求文字、備註、規則草稿（7/8，只缺驗收案例）、CLAUDE.md 都寫明', () => {
   const c = Rules.REQ_CATALOG['REQ-011']; assert(/購買當下就從庫存扣掉全部 10 條/.test(c.text) && /不再扣庫存/.test(c.text) && /已決定/.test(c.decision));
@@ -365,12 +379,24 @@ check('寄庫', '寄庫決定：購買當下就扣庫存——需求文字、備
   s.wb.requirements.find(r => r.id === 'REQ-006').text = '我自己改的字'; s.wb.requirements.find(r => r.id === 'REQ-006').edited = true;
   s.wb.interview.questions.push({ text: '寄庫的輪胎，購買當下就從庫存扣掉，還是等客戶取貨才扣？（舊）', resolved: false });
   mem['aiwb_state_v01'] = JSON.stringify(s); const m = Store.load(); delete mem['aiwb_state_v01'];
-  assert(m.meta.data_version === 4 && m.wb.requirements.find(r => r.id === 'REQ-011').text === c.text && m.wb.requirements.find(r => r.id === 'REQ-011').note === c.decision, 'v3→v4');
+  assert(m.meta.data_version === 5 && m.wb.requirements.find(r => r.id === 'REQ-011').text === c.text && m.wb.requirements.find(r => r.id === 'REQ-011').note === c.decision, 'v3→v4');
   assert(!m.wb.interview.questions.some(q => /寄庫的輪胎/.test(q.text)), '舊疑問沒移除');
   assert(m.wb.requirements.find(r => r.id === 'REQ-006').text === '我自己改的字', '人改過的需求被覆蓋');
 });
-check('參考', '狀態機：第一版 5 個轉換、其餘 5 個候選；九大難點：做 2、部分 1、候選 6；RRB 七項', () => {
-  assert(Rules.STATE_MACHINE.filter(t => t.v1).length === 5 && Rules.STATE_MACHINE.length === 10);
+check('升級', '第 4 版升到第 5 版：補進貨單清單與編號、補 REQ-024／025、移除「出貨」舊疑問、沒被改過的 RULE-021 換成完整版', () => {
+  const s = clone(W); s.meta.data_version = 4;
+  delete s.receipts; delete s.seq.receipt; delete s.seq.product;
+  s.wb.requirements = s.wb.requirements.filter(r => r.id !== 'REQ-024' && r.id !== 'REQ-025');
+  s.wb.interview.questions.push({ text: '核准之後，還要不要有「出貨」這一步來真正扣掉在庫？（舊）', resolved: false });
+  s.wb.rules = [{ ...clone(Rules.RULE_TEMPLATES.find(r => r.id === 'RULE-021')), t: { action: '', effect: '', message: '', audit: '', tests: [], final: '' }, f: { action: '', effect: '', message: '', audit: '', tests: [], final: '' }, edge: { text: '', tests: [] }, version: 'v0.1.0', orphan: false, created_at: 'x', edited_at: null }];
+  mem['aiwb_state_v01'] = JSON.stringify(s); const m = Store.load(); delete mem['aiwb_state_v01'];
+  assert(m.meta.data_version === 5 && Array.isArray(m.receipts) && m.seq.receipt === 1 && m.seq.product === 9, '資料版本或進貨單欄位');
+  assert(['REQ-024', 'REQ-025'].every(id => m.wb.requirements.some(r => r.id === id && r.status === 'ai')), '沒補 REQ-024／025');
+  assert(!m.wb.interview.questions.some(q => /還要不要有「出貨」這一步/.test(q.text)), '舊疑問沒移除');
+  assert(Rules.check(m.wb.rules[0]).complete, '沒被改過的 RULE-021 沒有換成完整版');
+});
+check('參考', '狀態機：第一版 6 個轉換（含出貨完成）、其餘 4 個候選；九大難點：做 2、部分 1、候選 6；RRB 七項', () => {
+  assert(Rules.STATE_MACHINE.filter(t => t.v1).length === 6 && Rules.STATE_MACHINE.length === 10);
   const n = k => Rules.DIFFICULTIES.filter(d => d.v1 === k).length; assert(Rules.DIFFICULTIES.length === 9 && n('做') === 2 && n('部分') === 1 && n('候選') === 6);
   assert(Rules.RRB.length === 7 && Rules.RRB.filter(x => x.reqs.some(id => D.wb.requirements.some(r => r.id === id))).length === 7);
 });
@@ -380,6 +406,38 @@ check('版本', '完成前 9 項（自動 4、人工 5）；測試 PASS 後自�
   const v = Store.wb.saveVersion(x, 'v1'); assert(v.ok && v.state.wb.versions[0].id === 'v0.1.0' && Rules.nextVersion(v.state.wb.versions) === 'v0.1.1');
 });
 check('重設', 'Store.reset() 回到 SEED', () => { Store.save(D); const s = Store.reset(); assert(JSON.stringify(s) === JSON.stringify(SEED) && JSON.stringify(Store.load()) === JSON.stringify(SEED)); });
+
+// ---------- Sprint 1：商品＋進出貨 ----------
+check('Sprint 1', '完整流程：送出 → 核准 → 出貨：核准不動庫存、出貨在庫與預留各扣、可用全程不變（核准後）', () => {
+  const x = sub(SEED, 'U01', 'TR-001', 2); const a = ERP.approveOrder(x.state, 'U03', x.id);
+  assert(prod(a.state, 'TR-001').on_hand === 130 && prod(a.state, 'TR-001').reserved === 8 && avail(a.state, 'TR-001') === 122);
+  const s = ERP.shipOrder(a.state, 'U03', x.id);
+  assert(s.ok && prod(s.state, 'TR-001').on_hand === 128 && prod(s.state, 'TR-001').reserved === 6 && avail(s.state, 'TR-001') === 122);
+  assert(ERP.view.invariants(s.state).length === 0 && s.state.orders.find(o => o.id === x.id).status === 'SHIPPED');
+});
+check('Sprint 1', '已出貨的訂單不能退回、拒絕、再核准、再出貨；業務看得到自己訂單變「已出貨」', () => {
+  const s = ERP.shipOrder(SEED, 'U03', 'SO-0001').state;
+  assert(!ERP.returnOrder(s, 'U03', 'SO-0001', '').ok && !ERP.rejectOrder(s, 'U03', 'SO-0001', '').ok && !ERP.approveOrder(s, 'U03', 'SO-0001').ok && !ERP.shipOrder(s, 'U04', 'SO-0001').ok);
+  assert(ERP.view.orders(s, 'U01').some(o => o.id === 'SO-0001' && o.status === 'SHIPPED'));
+});
+check('Sprint 1', '進貨後可用增加；進貨的商品可以再被叫貨送出（先進貨才有庫存的新商品）', () => {
+  const a = ERP.addProduct(SEED, 'U03', { brand: '固特異', name: 'A', spec: '195/60R15', year: 2025, cost: 100, price: 200 });
+  const c = ERP.addLine(a.state, 'U01', a.data.sku, 3); assert(c.ok);
+  assert(!ERP.submitOrder(c.state, 'U01', c.data.order_id).ok, '沒進貨的新商品不該送得出去');
+  const r = ERP.receiveStock(c.state, 'U03', a.data.sku, 10); assert(r.ok && avail(r.state, a.data.sku) === 10);
+  const ok = ERP.submitOrder(r.state, 'U01', c.data.order_id); assert(ok.ok && avail(ok.state, a.data.sku) === 7);
+});
+check('Sprint 1', '新商品的成本對業務隱藏（RULE-001 同樣適用）；進貨與商品管理只有老闆', () => {
+  const a = ERP.addProduct(SEED, 'U03', { brand: '固特異', name: 'A', spec: '195/60R15', year: 2025, cost: 100, price: 200 });
+  const q = ERP.queryStock(a.state, 'U01', '195/60R15'); assert(q.data.length === 1 && !('cost' in q.data[0]) && !('margin' in q.data[0]));
+  assert(ERP.queryStock(a.state, 'U03', '195/60R15').data[0].cost === 100);
+});
+check('Sprint 1', 'RULE-010／011／021 成立、不成立、特殊情況都有已實作的驗收案例，8 項都完整', () => {
+  for (const id of ['RULE-010', 'RULE-011', 'RULE-021']) {
+    const t = Rules.RULE_TEMPLATES.find(r => r.id === id);
+    assert(Rules.check(t).complete && t.t.tests.length && t.f.tests.length && t.edge.tests.length && Rules.implemented(t), id);
+  }
+});
 
 // ---------- 版本線 ----------
 const builtState = () => {

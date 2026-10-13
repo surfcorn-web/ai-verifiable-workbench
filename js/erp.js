@@ -279,6 +279,116 @@ var ERP = (function () {
   }
 
   // ---------------------------------------------------------------------
+  // RULE-010 出貨完成：只有老闆；只處理「已核准」；在庫與預留各扣訂購數（預留被用掉，可用不變）；不可重複出貨
+  // ---------------------------------------------------------------------
+  function shipOrder(db, userId, orderId) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    if (!Rules.isBoss(u)) return deny(s, u, 'SHIP_DENIED', 'RULE-010', orderId, '只有老闆可以出貨');
+    var o = findOrder(s, orderId);
+    if (!o) return deny(s, u, 'SHIP_DENIED', 'RULE-010', orderId, '找不到訂單 ' + orderId);
+    if (!Rules.canShip(o)) {
+      return deny(s, u, 'SHIP_DENIED', 'RULE-010', o.id, '只有已核准的訂單可以出貨；' + o.id + ' 目前是「' + statusLabel(o.status) + '」');
+    }
+    var n = need(o);
+    var skus = Object.keys(n);
+    var broken = skus.filter(function (sku) { var p = findProduct(s, sku); return !p || p.on_hand < n[sku] || p.reserved < n[sku]; });
+    if (broken.length) {
+      return deny(s, u, 'SHIP_DENIED', 'RULE-010', o.id, o.id + ' 庫存資料對不起來（在庫或預留比出貨數量少），不能出貨', { skus: broken });
+    }
+    var rows = skus.map(function (sku) {
+      var p = findProduct(s, sku);
+      var row = { sku: sku, spec: p.spec, qty: n[sku], before: p.on_hand };
+      p.on_hand -= n[sku];
+      p.reserved -= n[sku];
+      row.after = p.on_hand;
+      return row;
+    });
+    setStatus(o, 'SHIPPED', u, '出貨完成');
+    o.shipped_at = now();
+    o.shipped_by = u.id;
+    var msg = o.id + ' 出貨完成（' + rows.map(function (r) { return r.spec + ' 在庫 ' + r.before + ' → ' + r.after; }).join('；') + '），預留已用掉';
+    audit(s, u, 'SHIPPED', 'RULE-010', o.id, true, msg, { rows: rows });
+    return result(true, msg, s, { status: 'SHIPPED', rows: rows });
+  }
+
+  // ---------------------------------------------------------------------
+  // RULE-021 進貨入庫：只有老闆；數量必須為正整數；在庫增加並留下進貨單號
+  // ---------------------------------------------------------------------
+  function receiveStock(db, userId, sku, qty, note) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    if (!Rules.isBoss(u)) return deny(s, u, 'RECEIVE_DENIED', 'RULE-021', sku, '只有老闆可以進貨');
+    var p = findProduct(s, sku);
+    if (!p) return deny(s, u, 'RECEIVE_DENIED', 'RULE-021', sku, '找不到品項 ' + sku);
+    if (!Rules.isPositiveInt(qty)) return deny(s, u, 'RECEIVE_DENIED', 'RULE-021', sku, '進貨數量必須為正整數', { qty: String(qty) });
+    var n = Rules.parseQty(qty);
+    s.receipts = s.receipts || [];
+    s.seq.receipt = s.seq.receipt || (s.receipts.length + 1);
+    var no = 'RC-' + pad(s.seq.receipt++, 4);
+    var before = p.on_hand;
+    p.on_hand += n;
+    s.receipts.push({ id: no, sku: sku, qty: n, by: u.id, at: now(), note: String(note || '').trim(), before: before, after: p.on_hand });
+    var msg = '進貨完成：' + p.spec + ' ＋' + n + ' 條（進貨單 ' + no + '；在庫 ' + before + ' → ' + p.on_hand + '）';
+    audit(s, u, 'RECEIVED', 'RULE-021', no, true, msg, { sku: sku, qty: n, receipt: no });
+    return result(true, msg, s, { receipt: no });
+  }
+
+  // ---------------------------------------------------------------------
+  // RULE-011 商品管理：只有老闆可以新增商品、修改售價與成本；商品不可重複
+  // ---------------------------------------------------------------------
+  function money(v) {
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string' && /^\s*\d+(\.\d{1,2})?\s*$/.test(v)) return Number(v);
+    return NaN;
+  }
+
+  function nextSku(s) {
+    var max = 0;
+    s.products.forEach(function (p) { var m = /^TR-(\d+)$/.exec(p.sku); if (m) max = Math.max(max, Number(m[1])); });
+    return 'TR-' + pad(max + 1, 3);
+  }
+
+  function addProduct(db, userId, f) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    f = f || {};
+    if (!Rules.isBoss(u)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', '', '只有老闆可以新增商品');
+    var brand = String(f.brand || '').trim(), name = String(f.name || '').trim(), spec = String(f.spec || '').trim();
+    var year = Number(f.year), price = money(f.price), cost = money(f.cost);
+    if (!brand || !spec) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '品牌和規格一定要填');
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '年份要填 4 位數，例如 2025');
+    if (!(price > 0) || !(cost >= 0) || !isFinite(price) || !isFinite(cost)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '售價要大於 0，成本不能是負數');
+    var key = function (p) { return [p.brand, p.name, p.spec, p.year].join('|').toLowerCase(); };
+    var dup = s.products.filter(function (p) { return key(p) === key({ brand: brand, name: name, spec: spec, year: year }); })[0];
+    if (dup) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', dup.sku, '已經有這個商品了（' + dup.sku + '），不能重複新增');
+    var sku = nextSku(s);
+    s.products.push({ sku: sku, brand: brand, name: name, spec: spec, year: year, on_hand: 0, reserved: 0, cost: cost, price: price });
+    s.seq.product = Number(sku.slice(3)) + 1;
+    var msg = '已新增商品 ' + sku + '：' + spec + ' ' + brand + (name ? ' ' + name : '') + '（在庫 0，要進貨才有庫存）';
+    audit(s, u, 'PRODUCT_ADDED', 'RULE-011', sku, true, msg, { sku: sku });
+    return result(true, msg, s, { sku: sku });
+  }
+
+  function updateProduct(db, userId, sku, f) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    f = f || {};
+    if (!Rules.isBoss(u)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '只有老闆可以修改售價與成本');
+    var p = findProduct(s, sku);
+    if (!p) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '找不到品項 ' + sku);
+    var price = f.price === undefined ? p.price : money(f.price);
+    var cost = f.cost === undefined ? p.cost : money(f.cost);
+    if (!(price > 0) || !(cost >= 0) || !isFinite(price) || !isFinite(cost)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '售價要大於 0，成本不能是負數');
+    if (price === p.price && cost === p.cost) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, p.spec + ' 的售價與成本沒有變動');
+    var msg = p.spec + '：售價 ' + p.price + ' → ' + price + '；成本 ' + p.cost + ' → ' + cost;
+    p.price = price;
+    p.cost = cost;
+    audit(s, u, 'PRODUCT_UPDATED', 'RULE-011', sku, true, msg, { sku: sku });
+    return result(true, msg, s);
+  }
+
+  // ---------------------------------------------------------------------
   // 唯讀查詢（不寫 audit）
   // ---------------------------------------------------------------------
   var view = {
@@ -295,6 +405,19 @@ var ERP = (function () {
       return db.orders.filter(function (o) {
         return o.status !== 'DRAFT' && (Rules.isBoss(u) || o.created_by === u.id);
       }).slice().reverse();
+    },
+    // 老闆待出貨（已核准、還沒出貨）
+    shippable: function (db, userId) {
+      if (!Rules.isBoss(findUser(db, userId))) return [];
+      return db.orders.filter(function (o) { return o.status === 'APPROVED'; }).map(function (o) {
+        var c = clone(o);
+        c.lines.forEach(function (l) { l.label = label(findProduct(db, l.sku)); });
+        return c;
+      });
+    },
+    // 最近的進貨單
+    receipts: function (db, limit) {
+      return (db.receipts || []).slice(-(limit || 10)).reverse();
     },
     // 老闆待審核（預留都已建立）
     pending: function (db, userId) {
@@ -331,6 +454,10 @@ var ERP = (function () {
     approveOrder: approveOrder,
     rejectOrder: rejectOrder,
     returnOrder: returnOrder,
+    shipOrder: shipOrder,
+    receiveStock: receiveStock,
+    addProduct: addProduct,
+    updateProduct: updateProduct,
     view: view
   };
 })();
