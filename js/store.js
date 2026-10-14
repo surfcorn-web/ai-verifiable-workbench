@@ -21,8 +21,8 @@ var Store = (function () {
   }
 
   // ---------- 舊資料升級 ----------
-  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）；3：加入參考 ERP 案例的候選需求；4：寄庫採購買當下就扣庫存；5：Sprint 1 進出貨與商品管理；6：Sprint 3 安全庫存警示與規則變更
-  var DATA_VERSION = 6;
+  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）；3：加入參考 ERP 案例的候選需求；4：寄庫採購買當下就扣庫存；5：Sprint 1 進出貨與商品管理；6：Sprint 3 安全庫存警示與規則變更；7：登入與角色權限、末端價
+  var DATA_VERSION = 7;
 
   function prodOf(s, sku) { return s.products.filter(function (p) { return p.sku === sku; })[0]; }
 
@@ -44,6 +44,7 @@ var Store = (function () {
     if (v < 4) migrateToV4(s);
     if (v < 5) migrateToV5(s);
     if (v < 6) migrateToV6(s);
+    if (v < 7) migrateToV7(s);
     s.meta.data_version = DATA_VERSION;
     return s;
   }
@@ -54,7 +55,7 @@ var Store = (function () {
       var c = Rules.REQ_CATALOG[r.id];
       if (!c || r.edited) return;
       r.text = c.text; r.priority = c.priority; r.quality = c.quality.slice();
-      if (!r.note && c.decision) r.note = c.decision;
+      if (c.decision && (!r.note || r.note === '預留時機（二選一）' || r.note.indexOf('替代方案：與') === 0 || r.note.indexOf('預留時機還沒決定') === 0)) r.note = c.decision;
     });
     s.wb.rules = s.wb.rules.map(function (r) {
       var t = r.edited_at ? null : Rules.RULE_TEMPLATES.filter(function (x) { return x.id === r.id; })[0];
@@ -104,6 +105,30 @@ var Store = (function () {
       id: 'REQ-026', text: c.text, priority: c.priority, quality: c.quality.slice(), group: '',
       status: 'ai', source: 'AI 流程走查（升級補充）', evidence: 'AI 依 ERP 難點檢核清單推論（沒有使用者原話）', note: '', edited: false,
       history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充（Sprint 3）' }]
+    });
+  }
+
+  // v7：登入與角色權限、末端價。補新帳號與登入資料（密碼只在使用者資料裡）、補末端價；問答已完成的專案補上 REQ-027（AI 建議）
+  function migrateToV7(s) {
+    SEED.users.forEach(function (su) {
+      var u = s.users.filter(function (x) { return x.id === su.id; })[0];
+      if (!u) { s.users.push(clone(su)); return; }
+      if (!u.account) u.account = su.account;
+      if (!u.password) u.password = su.password;
+    });
+    s.products.forEach(function (p) {
+      if (p.retail !== undefined) return;
+      var seed = SEED.products.filter(function (x) { return x.sku === p.sku; })[0];
+      p.retail = seed && seed.retail != null ? seed.retail : null;
+    });
+    refreshUnedited(s);
+    if (s.wb.interview.step < Rules.DONE_STEP) return;
+    if (s.wb.requirements.some(function (r) { return r.id === 'REQ-027'; })) return;
+    var c = Rules.REQ_CATALOG['REQ-027'];
+    s.wb.requirements.push({
+      id: 'REQ-027', text: c.text, priority: c.priority, quality: c.quality.slice(), group: '',
+      status: 'ai', source: 'AI 流程走查（升級補充）', evidence: 'AI 依 ERP 難點檢核清單推論（沒有使用者原話）', note: '', edited: false,
+      history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充（登入與角色權限）' }]
     });
   }
 
@@ -270,7 +295,7 @@ var Store = (function () {
       s.wb.requirements.push({
         id: a.id, text: cat.text, priority: cat.priority, quality: cat.quality.slice(),
         group: cat.group || '', status: a.status, source: a.source, evidence: a.evidence,
-        note: a.note || cat.decision || '', edited: false,
+        note: cat.decision || a.note || '', edited: false,
         history: [{ at: now(), by: 'AI', to: a.status, note: '訪談產生草稿' }]
       });
     });
@@ -420,6 +445,91 @@ var Store = (function () {
     return result(true, '已儲存（8 項檢查已完成 ' + ck.score + ' 項）', s);
   };
 
+  // 用白話寫驗收案例：自動編號、加進規則的驗收清單；之後由 AI 工程師依這個例子寫成自動測試（TESTS.md 會列出）
+  var CASE_SIDES = { t: '條件成立時', f: '條件不成立時', edge: '特殊情況' };
+  // 產生一個不重複的案例編號（TC-規則號-nn），把案例記進規則；by＝'AI' 表示是 AI 整理的
+  function pushDraftCase(s, rule, side, given, expect, by) {
+    var num = (/(\d+)$/.exec(rule.id) || [])[1] || '000';
+    var used = {};
+    s.wb.rules.forEach(function (r) { Rules.testIds(r).forEach(function (id) { used[id] = true; }); });
+    var n = 1, id;
+    do { id = 'TC-' + num + '-' + (n < 10 ? '0' + n : n); n++; } while (used[id] || (typeof Tests !== 'undefined' && Tests.byId(id)));
+    rule.drafts = Array.isArray(rule.drafts) ? rule.drafts : [];
+    var d = { id: id, side: side, given: given, expect: expect, at: now() };
+    if (by) d.by = by;
+    rule.drafts.push(d);
+    rule[side] = rule[side] || {};
+    rule[side].tests = (Array.isArray(rule[side].tests) ? rule[side].tests : []).concat(id);
+    return id;
+  }
+  wb.addCase = function (db, ruleId, side, given, expect) {
+    if (!CASE_SIDES[side]) return result(false, '不認得的分支：' + side, db);
+    var g = String(given == null ? '' : given).trim(), x = String(expect == null ? '' : expect).trim();
+    if (!g || !x) return result(false, '「什麼情況下」和「應該發生什麼事」都要寫', db);
+    var s = clone(db);
+    var rule = findRule(s, ruleId);
+    if (!rule) return result(false, '找不到規則 ' + ruleId, db);
+    var id = pushDraftCase(s, rule, side, g, x, '');
+    rule.edited_at = now();
+    var ck = Rules.check(rule);
+    wbLog(s, 'CASE_ADD', ruleId + ' ' + id);
+    return result(true, '已加入驗收案例 ' + id + '（' + CASE_SIDES[side] + '）。還沒有自動測試，要請 AI 工程師依這個例子實作。8 項檢查已完成 ' + ck.score + ' 項。', s, { id: id });
+  };
+
+  // 請 AI 幫忙補：①空白的欄位用白話草稿補上（不會蓋掉你寫的）②成立、不成立各整理一個驗收案例。
+  // AI 補的內容要人按「我看過了」確認，規則才算寫完整（AI 只能提議，人決定）。
+  wb.aiComplete = function (db, ruleId) {
+    var s = clone(db);
+    var rule = findRule(s, ruleId);
+    if (!rule) return result(false, '找不到規則 ' + ruleId, db);
+    var draft = Rules.AI_DRAFTS[ruleId] || {};
+    var keys = [];
+    ['t', 'f'].forEach(function (side) {
+      rule[side] = rule[side] || {};
+      Object.keys(draft[side] || {}).forEach(function (k) {
+        if (!String(rule[side][k] || '').trim()) { rule[side][k] = draft[side][k]; keys.push(side + '.' + k); }
+      });
+    });
+    if (draft.edge && !String((rule.edge || {}).text || '').trim()) { rule.edge = rule.edge || { text: '', tests: [] }; rule.edge.text = draft.edge; keys.push('edge.text'); }
+    var cases = [];
+    Rules.deriveCases(rule).forEach(function (c) { cases.push(pushDraftCase(s, rule, c.side, c.given, c.expect, 'AI')); });
+    if (!keys.length && !cases.length) return result(false, 'AI 沒有可以補的內容：這條規則已經寫齊了，或是「遇到什麼情況」還沒寫', db);
+    var old = rule.ai_draft || {};
+    rule.ai_draft = { at: now(), fields: (old.fields || []).concat(keys), cases: (old.cases || []).concat(cases), reviewed: false };
+    rule.edited_at = now();
+    wbLog(s, 'AI_DRAFT', ruleId + ' 補 ' + keys.length + ' 欄、' + cases.length + ' 案例');
+    return result(true, 'AI 補上了 ' + keys.length + ' 項內容、' + cases.length + ' 個驗收案例。請看過是否正確，沒問題再按「我看過了」。', s, { fields: keys, cases: cases });
+  };
+
+  wb.confirmAiDraft = function (db, ruleId) {
+    var s = clone(db);
+    var rule = findRule(s, ruleId);
+    if (!rule) return result(false, '找不到規則 ' + ruleId, db);
+    if (!rule.ai_draft || rule.ai_draft.reviewed) return result(false, '這條規則沒有需要確認的 AI 建議', db);
+    rule.ai_draft.reviewed = true;
+    rule.ai_draft.reviewed_at = now();
+    rule.edited_at = now();
+    var ck = Rules.check(rule);
+    wbLog(s, 'AI_DRAFT_OK', ruleId);
+    return result(true, '已確認 AI 的建議' + (ck.complete ? '，這條規則寫完整了' : '，這條規則還缺：' + ck.missing.join('、')), s);
+  };
+
+  wb.removeCase = function (db, ruleId, caseId) {
+    var s = clone(db);
+    var rule = findRule(s, ruleId);
+    if (!rule) return result(false, '找不到規則 ' + ruleId, db);
+    var d = (rule.drafts || []).filter(function (x) { return x.id === caseId; })[0];
+    if (!d) return result(false, '只能刪除自己用白話寫的驗收案例', db);
+    if (typeof Tests !== 'undefined' && Tests.byId(caseId)) return result(false, '這個案例已經有自動測試了，不能在這裡刪除', db);
+    rule.drafts = rule.drafts.filter(function (x) { return x.id !== caseId; });
+    ['t', 'f', 'edge'].forEach(function (k) {
+      if (rule[k] && Array.isArray(rule[k].tests)) rule[k].tests = rule[k].tests.filter(function (x) { return x !== caseId; });
+    });
+    rule.edited_at = now();
+    wbLog(s, 'CASE_DEL', ruleId + ' ' + caseId);
+    return result(true, '已刪除驗收案例 ' + caseId, s);
+  };
+
   // ---------- C 開發包 ----------
   wb.genDevpack = function (db) {
     var pack = Rules.devpack(db);
@@ -450,6 +560,7 @@ var Store = (function () {
     return result(true, value ? '已勾選' : '已取消勾選', s);
   };
 
+  var SNAP_KEEP = 10;
   wb.saveVersion = function (db, note) {
     var s = clone(db);
     var label = Rules.nextVersion(s.wb.versions);
@@ -458,10 +569,14 @@ var Store = (function () {
     s.wb.versions.push({
       id: label, at: now(), note: String(note || '').trim(),
       reqs: s.wb.requirements.map(function (r) { return { id: r.id, status: r.status, text: r.text }; }),
-      rules: s.wb.rules.map(function (r) { var c = Rules.check(r); return { id: r.id, title: r.title, score: c.score, complete: c.complete }; }),
+      rules: s.wb.rules.map(function (r) { var c = Rules.check(r); return { id: r.id, title: r.title, score: c.score, complete: c.complete, sig: Rules.ruleSig(r) }; }),
+      settings: { low_stock_op: s.settings && s.settings.low_stock_op === 'le' ? 'le' : 'lt' },
+      // 完整內容快照：可以整版回復（只留最近 10 個版本，避免瀏覽器存不下）
+      snap: { requirements: clone(s.wb.requirements), rules: clone(s.wb.rules), low_stock_op: s.settings && s.settings.low_stock_op === 'le' ? 'le' : 'lt' },
       tests: run ? { at: run.at, pass: run.pass, total: run.total, failed: run.results.filter(function (x) { return !x.pass; }).map(function (x) { return x.id; }) } : null,
       checklist: checks.map(function (c) { return { key: c.key, ok: c.ok }; })
     });
+    s.wb.versions.forEach(function (v, i) { if (i < s.wb.versions.length - SNAP_KEEP) delete v.snap; });
     s.meta.version = label;
     wbLog(s, 'VERSION', label);
     return result(true, '已建立版本 ' + label, s);
@@ -521,7 +636,7 @@ var Store = (function () {
     ch = findChange(s, id);
     if (reverting) ch.revert_regression = reg; else ch.regression = reg;
     if (!failed.length) {
-      var label = reverting ? '回復 ' + ch.id + '：' + ch.title : '變更 ' + ch.id + '：' + ch.title + '（理由：' + ch.reason + '）';
+      var label = ch.kind === 'restore' ? '整版回復 ' + ch.id + '：' + ch.title + '（理由：' + ch.reason + '）' : reverting ? '回復 ' + ch.id + '：' + ch.title : '變更 ' + ch.id + '：' + ch.title + '（理由：' + ch.reason + '）';
       s = wb.saveVersion(s, label).state;
       ch = findChange(s, id);
       if (reverting) ch.revert_version = s.meta.version; else { ch.version = s.meta.version; ch.status = 'verified'; }
@@ -530,7 +645,7 @@ var Store = (function () {
     }
     wbLog(s, reverting ? 'CHANGE_REVERT_TEST' : 'CHANGE_TEST', ch.id + ' ' + reg.pass + '/' + reg.total);
     var msg = failed.length
-      ? ch.id + '：有 ' + failed.length + ' 項驗收沒通過，沒有存成新版本。可以回復這次變更'
+      ? ch.id + '：有 ' + failed.length + ' 項驗收沒通過，沒有存成新版本。' + (ch.kind === 'restore' ? '可以再回復到另一個版本' : '可以回復這次變更')
       : ch.id + (reverting ? ' 已回復，' : ' 已套用，') + '全部 ' + reg.total + ' 項驗收通過，已存成 ' + s.meta.version;
     return result(!failed.length, msg, s);
   };
@@ -542,6 +657,7 @@ var Store = (function () {
     var s = clone(db);
     var ch = findChange(s, id);
     if (!ch) return result(false, '找不到變更 ' + id, db);
+    if (ch.kind === 'restore') return result(false, '整版回復不能再按「回復這次變更」；想回到別的版本，請到「存成版本」選那一版回復', db);
     if (ch.status === 'reverted') return result(false, ch.id + ' 已經回復過了', db);
     var newer = s.wb.changes.filter(function (c) { return c.kind === ch.kind && c.req_id === ch.req_id && c.status !== 'reverted' && c.id > ch.id; });
     if (newer.length) return result(false, '要先回復比較新的變更 ' + newer[newer.length - 1].id, db);
@@ -560,6 +676,47 @@ var Store = (function () {
     ch.revert_reason = why;
     wbLog(s, 'CHANGE_REVERT', ch.id);
     return result(true, ch.id + ' 已回復，接下來自動重跑全部驗收測試', s, { id: ch.id });
+  };
+
+  // ---------- 整版回復：把需求、規則與低庫存算法改回某個舊版本（訂單、庫存、進貨單、價格是營運資料，不動）----------
+  wb.restoreVersion = function (db, versionId, reason) {
+    var why = String(reason || '').trim();
+    if (!why) return result(false, '請寫下為什麼要回復（理由會留在變更紀錄裡）', db);
+    var s = clone(db);
+    var v = s.wb.versions.filter(function (x) { return x.id === versionId; })[0];
+    if (!v) return result(false, '找不到版本 ' + versionId, db);
+    if (!v.snap) return result(false, v.id + ' 沒有留下完整內容（系統只保留最近 ' + SNAP_KEEP + ' 個版本的完整內容），不能回復到它', db);
+    var diff = Rules.diffVersions(Rules.snapshotView(s), v).filter(function (d) { return d.kind !== 'test'; });
+    if (!diff.length) return result(false, '目前的內容和 ' + v.id + ' 一樣，不需要回復', db);
+    var prev = s.wb.versions[s.wb.versions.length - 1];
+    var cur = {};
+    s.wb.requirements.forEach(function (r) { cur[r.id] = r; });
+    var reqs = clone(v.snap.requirements);
+    reqs.forEach(function (r) {
+      var c = cur[r.id];
+      if (!c || c.text !== r.text || c.status !== r.status) r.history.push({ at: now(), by: 'HUMAN', to: r.status, note: '整版回復到 ' + v.id + '（理由：' + why + '）' });
+    });
+    s.wb.requirements = reqs;
+    s.wb.rules = clone(v.snap.rules);
+    var op = v.snap.low_stock_op;
+    var nowOp = s.settings && s.settings.low_stock_op === 'le' ? 'le' : 'lt';
+    if (op && op !== nowOp) {
+      var r = ERP.setLowStockRule(s, bossOf(s).id, op, '整版回復到 ' + v.id + '：' + why);
+      if (!r.ok) return result(false, r.message, r.state);
+      s = r.state;
+    }
+    if (s.wb.devpack) {
+      var g = wb.genDevpack(s);
+      s = g.ok ? g.state : (s.wb.devpack = null, s);
+    }
+    var ch = {
+      id: 'CHG-' + pad(s.wb.changes.length + 1, 3), at: now(), kind: 'restore', req_id: '', reason: why, by: '需求負責人',
+      status: 'applied', impact: { rules: [], tests: [], code: [], otherReqs: [], versions: [] }, from: prev ? prev.id : '', to: v.id,
+      title: '整版回復到 ' + v.id, diff: diff.map(function (d) { return d.text; }), regression: null, version: '', reverted_at: null
+    };
+    s.wb.changes.push(ch);
+    wbLog(s, 'RESTORE', ch.id + ' → ' + v.id);
+    return result(true, ch.id + ' 已回復到 ' + v.id + '，接下來自動重跑全部驗收測試', s, { id: ch.id });
   };
 
   return {

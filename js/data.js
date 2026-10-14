@@ -9,27 +9,32 @@ var SEED = {
     schema: 'aiwb_state_v01',
     app: 'AI 可驗證開發工作台',
     version: 'v0.1.0',
-    data_version: 6, // 6：Sprint 3 安全庫存警示與規則變更（舊資料載入時由 Store 自動升級）
-    build: '2026-10-14.1' // 程式版本標記：畫面左下角會顯示，用來確認瀏覽器載入的是最新檔案
+    data_version: 7, // 7：登入與角色權限、末端價（舊資料載入時由 Store 自動升級）
+    build: '2026-10-14.10' // 程式版本標記：畫面左下角會顯示，用來確認瀏覽器載入的是最新檔案
   },
 
   // ---------- ERP：輪胎批發 ----------
+  // 角色：admin 管理員、boss 老闆（都有全部權限）；sales 業務、warehouse 倉管、planner 生管（都是「員工」：看不到成本與毛利）
+  // account／password 是示範用的登入帳號（這是前端示範，不是真正的資安防護）；密碼不會出現在任何查詢結果、稽核或畫面表格
   users: [
-    { id: 'U01', name: '阿明', role: 'sales' },
-    { id: 'U02', name: '小芳', role: 'sales' },
-    { id: 'U03', name: '王老闆', role: 'boss' },
-    { id: 'U04', name: '王太太', role: 'boss' }
+    { id: 'U01', name: '阿明', role: 'sales', account: 'ming', password: 'ming123' },
+    { id: 'U02', name: '小芳', role: 'sales', account: 'fang', password: 'fang123' },
+    { id: 'U03', name: '王老闆', role: 'boss', account: 'boss', password: 'boss123' },
+    { id: 'U04', name: '王太太', role: 'boss', account: 'boss2', password: 'boss2123' },
+    { id: 'U05', name: '阿國', role: 'warehouse', account: 'keeper', password: 'keeper123' },
+    { id: 'U06', name: '小琪', role: 'planner', account: 'planner', password: 'planner123' },
+    { id: 'U07', name: '系統管理員', role: 'admin', account: 'admin', password: 'admin123' }
   ],
 
   products: [
-    { sku: 'TR-001', brand: '米其林 Michelin', name: 'Primacy 4', spec: '205/55R16', year: 2025, on_hand: 130, reserved: 6, cost: 2650, price: 3300, safety: 20 },
-    { sku: 'TR-002', brand: '普利司通 Bridgestone', name: 'Turanza T005', spec: '225/45R17', year: 2024, on_hand: 3, reserved: 2, cost: 3150, price: 3950, safety: 5 },
-    { sku: 'TR-003', brand: '馬牌 Continental', name: 'UltraContact UC7', spec: '215/55R17', year: 2025, on_hand: 48, reserved: 8, cost: 2900, price: 3600, safety: 20 },
-    { sku: 'TR-004', brand: '橫濱 Yokohama', name: 'BluEarth-GT AE51', spec: '195/65R15', year: 2023, on_hand: 60, reserved: 12, cost: 1850, price: 2300, safety: 20 },
-    { sku: 'TR-005', brand: '瑪吉斯 Maxxis', name: 'Victra Sport 5', spec: '235/45R18', year: 2025, on_hand: 20, reserved: 20, cost: 2700, price: 3400, safety: 5 },
-    { sku: 'TR-006', brand: '固特異 Goodyear', name: 'EfficientGrip Performance 2', spec: '205/60R16', year: 2024, on_hand: 36, reserved: 4, cost: 2350, price: 2900, safety: 10 },
-    { sku: 'TR-007', brand: '建大 Kenda', name: 'KR201', spec: '185/65R15', year: 2025, on_hand: 80, reserved: 0, cost: 1250, price: 1650, safety: 30 },
-    { sku: 'TR-008', brand: '米其林 Michelin', name: 'Pilot Sport 4', spec: '225/40R18', year: 2024, on_hand: 8, reserved: 0, cost: 4300, price: 5300, safety: 8 }
+    { sku: 'TR-001', brand: '米其林 Michelin', name: 'Primacy 4', spec: '205/55R16', year: 2025, on_hand: 130, reserved: 6, cost: 2650, price: 3300, retail: 4300, safety: 20 },
+    { sku: 'TR-002', brand: '普利司通 Bridgestone', name: 'Turanza T005', spec: '225/45R17', year: 2024, on_hand: 3, reserved: 2, cost: 3150, price: 3950, retail: 5100, safety: 5 },
+    { sku: 'TR-003', brand: '馬牌 Continental', name: 'UltraContact UC7', spec: '215/55R17', year: 2025, on_hand: 48, reserved: 8, cost: 2900, price: 3600, retail: 4700, safety: 20 },
+    { sku: 'TR-004', brand: '橫濱 Yokohama', name: 'BluEarth-GT AE51', spec: '195/65R15', year: 2023, on_hand: 60, reserved: 12, cost: 1850, price: 2300, retail: 3000, safety: 20 },
+    { sku: 'TR-005', brand: '瑪吉斯 Maxxis', name: 'Victra Sport 5', spec: '235/45R18', year: 2025, on_hand: 20, reserved: 20, cost: 2700, price: 3400, retail: 4400, safety: 5 },
+    { sku: 'TR-006', brand: '固特異 Goodyear', name: 'EfficientGrip Performance 2', spec: '205/60R16', year: 2024, on_hand: 36, reserved: 4, cost: 2350, price: 2900, retail: 3800, safety: 10 },
+    { sku: 'TR-007', brand: '建大 Kenda', name: 'KR201', spec: '185/65R15', year: 2025, on_hand: 80, reserved: 0, cost: 1250, price: 1650, retail: 2200, safety: 30 },
+    { sku: 'TR-008', brand: '米其林 Michelin', name: 'Pilot Sport 4', spec: '225/40R18', year: 2024, on_hand: 8, reserved: 0, cost: 4300, price: 5300, retail: 6800, safety: 8 }
   ],
 
   orders: [

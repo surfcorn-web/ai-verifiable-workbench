@@ -102,10 +102,36 @@ var ERP = (function () {
   // ---------------------------------------------------------------------
   // RULE-002 叫貨：數量必須為正整數（加入購物車不預留，送出才預留）
   // ---------------------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // RULE-029 登入：帳號（不分大小寫）存在、密碼完全相符才登入；失敗不說明是哪一個錯
+  // ---------------------------------------------------------------------
+  function login(db, account, password) {
+    var s = clone(db);
+    var acc = String(account == null ? '' : account).trim().toLowerCase();
+    var pw = String(password == null ? '' : password);
+    var u = acc ? s.users.filter(function (x) { return String(x.account || '').toLowerCase() === acc; })[0] : null;
+    if (!u || !u.password || u.password !== pw) {
+      audit(s, null, 'LOGIN_DENIED', 'RULE-029', acc || '（空白）', false, '帳號或密碼不正確', { account: acc });
+      return result(false, '帳號或密碼不正確', s);
+    }
+    var msg = '登入成功：' + u.name + '（' + Rules.ROLE[u.role] + '）';
+    audit(s, u, 'LOGIN', 'RULE-029', u.id, true, msg);
+    return result(true, msg, s, { user_id: u.id, name: u.name, role: u.role });
+  }
+
+  function logout(db, userId) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    if (!u) return deny(s, null, 'LOGIN_DENIED', 'RULE-029', String(userId || ''), '目前沒有登入');
+    var msg = u.name + ' 已登出';
+    audit(s, u, 'LOGOUT', 'RULE-029', u.id, true, msg);
+    return result(true, msg, s);
+  }
+
   function addLine(db, userId, sku, qty, customer) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isSales(u)) return deny(s, u, 'ADD_LINE_DENIED', '', sku, '只有業務可以叫貨');
+    if (!Rules.can(u, 'order')) return deny(s, u, 'ADD_LINE_DENIED', '', sku, '只有業務可以叫貨');
     var p = findProduct(s, sku);
     if (!p) return deny(s, u, 'ADD_LINE_DENIED', '', sku, '找不到品項 ' + sku);
     if (!Rules.isPositiveInt(qty)) {
@@ -221,7 +247,7 @@ var ERP = (function () {
   function approveOrder(db, userId, orderId) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'APPROVE_DENIED', 'RULE-006', orderId, '只有老闆可以核准');
+    if (!Rules.can(u, 'approve')) return deny(s, u, 'APPROVE_DENIED', 'RULE-006', orderId, '只有老闆或管理員可以核准');
     var o = findOrder(s, orderId);
     if (!o) return deny(s, u, 'APPROVE_DENIED', 'RULE-006', orderId, '找不到訂單 ' + orderId);
     if (!Rules.canApprove(o)) {
@@ -241,7 +267,7 @@ var ERP = (function () {
   function rejectOrder(db, userId, orderId, reason) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'REJECT_DENIED', 'RULE-007', orderId, '只有老闆可以拒絕');
+    if (!Rules.can(u, 'approve')) return deny(s, u, 'REJECT_DENIED', 'RULE-007', orderId, '只有老闆或管理員可以拒絕');
     var o = findOrder(s, orderId);
     if (!o) return deny(s, u, 'REJECT_DENIED', 'RULE-007', orderId, '找不到訂單 ' + orderId);
     if (!Rules.canReject(o)) {
@@ -263,7 +289,7 @@ var ERP = (function () {
   function returnOrder(db, userId, orderId, reason) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'RETURN_DENIED', 'RULE-005', orderId, '只有老闆可以退回');
+    if (!Rules.can(u, 'approve')) return deny(s, u, 'RETURN_DENIED', 'RULE-005', orderId, '只有老闆或管理員可以退回');
     var o = findOrder(s, orderId);
     if (!o) return deny(s, u, 'RETURN_DENIED', 'RULE-005', orderId, '找不到訂單 ' + orderId);
     if (!Rules.canReturn(o)) {
@@ -284,7 +310,7 @@ var ERP = (function () {
   function shipOrder(db, userId, orderId) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'SHIP_DENIED', 'RULE-010', orderId, '只有老闆可以出貨');
+    if (!Rules.can(u, 'ship')) return deny(s, u, 'SHIP_DENIED', 'RULE-010', orderId, '只有老闆或管理員可以出貨');
     var o = findOrder(s, orderId);
     if (!o) return deny(s, u, 'SHIP_DENIED', 'RULE-010', orderId, '找不到訂單 ' + orderId);
     if (!Rules.canShip(o)) {
@@ -318,7 +344,7 @@ var ERP = (function () {
   function receiveStock(db, userId, sku, qty, note) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'RECEIVE_DENIED', 'RULE-021', sku, '只有老闆可以進貨');
+    if (!Rules.can(u, 'receive')) return deny(s, u, 'RECEIVE_DENIED', 'RULE-021', sku, '只有老闆或管理員可以進貨');
     var p = findProduct(s, sku);
     if (!p) return deny(s, u, 'RECEIVE_DENIED', 'RULE-021', sku, '找不到品項 ' + sku);
     if (!Rules.isPositiveInt(qty)) return deny(s, u, 'RECEIVE_DENIED', 'RULE-021', sku, '進貨數量必須為正整數', { qty: String(qty) });
@@ -353,17 +379,21 @@ var ERP = (function () {
     var s = clone(db);
     var u = findUser(s, userId);
     f = f || {};
-    if (!Rules.isBoss(u)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', '', '只有老闆可以新增商品');
+    if (!Rules.can(u, 'product')) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', '', '只有老闆或管理員可以新增商品');
     var brand = String(f.brand || '').trim(), name = String(f.name || '').trim(), spec = String(f.spec || '').trim();
     var year = Number(f.year), price = money(f.price), cost = money(f.cost);
+    var hasRetail = f.retail !== undefined && f.retail !== null && String(f.retail).trim() !== '';
+    var retail = hasRetail ? money(f.retail) : null;
     if (!brand || !spec) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '品牌和規格一定要填');
     if (!Number.isInteger(year) || year < 2000 || year > 2100) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '年份要填 4 位數，例如 2025');
     if (!(price > 0) || !(cost >= 0) || !isFinite(price) || !isFinite(cost)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '售價要大於 0，成本不能是負數');
+    if (hasRetail && (!(retail > 0) || !isFinite(retail))) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '末端價要大於 0');
+    if (hasRetail && retail < price) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', spec, '末端價不能低於店家價');
     var key = function (p) { return [p.brand, p.name, p.spec, p.year].join('|').toLowerCase(); };
     var dup = s.products.filter(function (p) { return key(p) === key({ brand: brand, name: name, spec: spec, year: year }); })[0];
     if (dup) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', dup.sku, '已經有這個商品了（' + dup.sku + '），不能重複新增');
     var sku = nextSku(s);
-    s.products.push({ sku: sku, brand: brand, name: name, spec: spec, year: year, on_hand: 0, reserved: 0, cost: cost, price: price, safety: 0 });
+    s.products.push({ sku: sku, brand: brand, name: name, spec: spec, year: year, on_hand: 0, reserved: 0, cost: cost, price: price, retail: retail, safety: 0 });
     s.seq.product = Number(sku.slice(3)) + 1;
     var msg = '已新增商品 ' + sku + '：' + spec + ' ' + brand + (name ? ' ' + name : '') + '（在庫 0，要進貨才有庫存）';
     audit(s, u, 'PRODUCT_ADDED', 'RULE-011', sku, true, msg, { sku: sku });
@@ -374,16 +404,20 @@ var ERP = (function () {
     var s = clone(db);
     var u = findUser(s, userId);
     f = f || {};
-    if (!Rules.isBoss(u)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '只有老闆可以修改售價與成本');
+    if (!Rules.can(u, 'product')) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '只有老闆或管理員可以修改店家價、末端價與成本');
     var p = findProduct(s, sku);
     if (!p) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '找不到品項 ' + sku);
     var price = f.price === undefined ? p.price : money(f.price);
     var cost = f.cost === undefined ? p.cost : money(f.cost);
-    if (!(price > 0) || !(cost >= 0) || !isFinite(price) || !isFinite(cost)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '售價要大於 0，成本不能是負數');
-    if (price === p.price && cost === p.cost) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, p.spec + ' 的售價與成本沒有變動');
-    var msg = p.spec + '：售價 ' + p.price + ' → ' + price + '；成本 ' + p.cost + ' → ' + cost;
+    var retail = f.retail === undefined ? (p.retail == null ? null : p.retail) : money(f.retail);
+    if (!(price > 0) || !(cost >= 0) || !isFinite(price) || !isFinite(cost)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '店家價要大於 0，成本不能是負數');
+    if (retail !== null && (!(retail > 0) || !isFinite(retail))) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '末端價要大於 0');
+    if (retail !== null && retail < price) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, '末端價不能低於店家價');
+    if (price === p.price && cost === p.cost && retail === (p.retail == null ? null : p.retail)) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', sku, p.spec + ' 的店家價、末端價與成本沒有變動');
+    var msg = p.spec + '：店家價 ' + p.price + ' → ' + price + '；末端價 ' + (p.retail == null ? '未設定' : p.retail) + ' → ' + (retail == null ? '未設定' : retail) + '；成本 ' + p.cost + ' → ' + cost;
     p.price = price;
     p.cost = cost;
+    p.retail = retail;
     audit(s, u, 'PRODUCT_UPDATED', 'RULE-011', sku, true, msg, { sku: sku });
     return result(true, msg, s);
   }
@@ -394,7 +428,7 @@ var ERP = (function () {
   function setSafetyStock(db, userId, sku, qty) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'SAFETY_DENIED', 'RULE-027', sku, '只有老闆可以設定安全庫存');
+    if (!Rules.can(u, 'safety')) return deny(s, u, 'SAFETY_DENIED', 'RULE-027', sku, '只有老闆或管理員可以設定安全庫存');
     var p = findProduct(s, sku);
     if (!p) return deny(s, u, 'SAFETY_DENIED', 'RULE-027', sku, '找不到品項 ' + sku);
     if (!Rules.isNonNegInt(qty)) return deny(s, u, 'SAFETY_DENIED', 'RULE-027', sku, '安全庫存要填 0 或正整數', { qty: String(qty) });
@@ -414,7 +448,7 @@ var ERP = (function () {
   function setLowStockRule(db, userId, op, reason) {
     var s = clone(db);
     var u = findUser(s, userId);
-    if (!Rules.isBoss(u)) return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '只有老闆可以修改低庫存規則');
+    if (!Rules.can(u, 'lowrule')) return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '只有老闆或管理員可以修改低庫存規則');
     if (op !== 'lt' && op !== 'le') return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '比較方式只能選「小於」或「小於或等於」', { op: String(op) });
     var why = String(reason || '').trim();
     if (!why) return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '要寫下為什麼要改（理由會留在紀錄裡）');
@@ -492,6 +526,8 @@ var ERP = (function () {
   };
 
   return {
+    login: login,
+    logout: logout,
     queryStock: queryStock,
     addLine: addLine,
     updateLine: updateLine,

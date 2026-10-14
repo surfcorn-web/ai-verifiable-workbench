@@ -1,4 +1,4 @@
-/* tests.js — 驗收測試（每條規則的「成立」和「不成立」都要 PASS）：第一版 13 個＋Sprint 1 進出貨與商品管理 9 個＋Sprint 3 安全庫存警示與規則變更 9 個
+/* tests.js — 驗收測試（每條規則的「成立」和「不成立」都要 PASS）：第一版 13 個＋Sprint 1 進出貨與商品管理 9 個＋Sprint 3 安全庫存警示與規則變更 9 個＋登入與角色權限 7 個
  * 全域物件：Tests
  * - 每個案例都從 SEED 的複本開始，不碰 localStorage。
  * - 2026-10-13 使用者決定改為「送出即預留」（REQ-004B），本檔依新規則改寫（使用者已同意修改 tests.js）。
@@ -668,6 +668,174 @@ var Tests = (function () {
           cur = r.state;
         });
         return '4 種不該改的情況都被拒絕，設定維持「小於」';
+      }
+    },
+    {
+      id: 'TC-029-01', rule: 'RULE-029', req: 'REQ-027', branch: 'True',
+      title: '帳號與密碼正確 → 登入成功並留下紀錄',
+      given: '老闆、管理員、業務、倉管、生管各用自己的帳號與正確密碼登入（帳號大小寫不影響）',
+      expect: '每個人都登入成功，拿到自己的角色；稽核記下「登入」與是誰；庫存與訂單都不變',
+      run: function () {
+        var db = fresh();
+        var before = stock(db), orders = JSON.stringify(db.orders);
+        var roles = [];
+        ['U03', 'U07', 'U01', 'U05', 'U06'].forEach(function (id) {
+          var u = db.users.filter(function (x) { return x.id === id; })[0];
+          var r = ERP.login(db, id === 'U03' ? u.account.toUpperCase() : ' ' + u.account + ' ', u.password);
+          expect(r.ok && r.data.user_id === id && r.data.role === u.role, id + ' 登入失敗：' + r.message);
+          var a = lastAudit(r.state);
+          expect(a.action === 'LOGIN' && a.actor === id && a.ok === true, '稽核沒有記下登入');
+          expect(stock(r.state) === before && JSON.stringify(r.state.orders) === orders, '登入不應該改動庫存與訂單');
+          roles.push(Rules.ROLE[u.role]);
+        });
+        return '五種角色都能登入：' + roles.join('、');
+      }
+    },
+    {
+      id: 'TC-029-02', rule: 'RULE-029', req: 'REQ-027', branch: 'False',
+      title: '密碼錯、帳號不存在、帳號或密碼空白 → 不登入，也不說是哪個錯',
+      given: '老闆帳號配錯密碼；不存在的帳號；空白帳號；空白密碼；密碼多一個空格',
+      expect: '全部登入失敗，訊息一模一樣「帳號或密碼不正確」；資料不變，只多一筆「登入失敗」稽核',
+      run: function () {
+        var db = fresh();
+        var boss = db.users.filter(function (x) { return x.id === 'U03'; })[0];
+        var tries = [[boss.account, 'wrong'], ['nobody', boss.password], ['', boss.password], [boss.account, ''], [boss.account, boss.password + ' ']];
+        var cur = db, msgs = {};
+        tries.forEach(function (t, i) {
+          var r = ERP.login(cur, t[0], t[1]);
+          expect(!r.ok && !r.data, '第 ' + (i + 1) + ' 種不該登入成功');
+          msgs[r.message] = true;
+          var a = lastAudit(r.state);
+          expect(a.action === 'LOGIN_DENIED' && a.ok === false, '沒有留下登入失敗的稽核');
+          expect(r.state.audit.length === cur.audit.length + 1 && stock(r.state) === stock(db) && JSON.stringify(r.state.orders) === JSON.stringify(db.orders), '資料被動到了');
+          cur = r.state;
+        });
+        expect(Object.keys(msgs).length === 1 && msgs['帳號或密碼不正確'], '失敗訊息不一致，會洩漏哪個是錯的：' + Object.keys(msgs).join('｜'));
+        return '5 種失敗都是同一句「帳號或密碼不正確」，各留一筆稽核';
+      }
+    },
+    {
+      id: 'TC-029-03', rule: 'RULE-029', req: 'REQ-027', branch: '邊界',
+      title: '密碼不會出現在登入結果、查詢結果與稽核紀錄',
+      given: '用每個帳號登入，並查詢庫存；登入失敗也記錄',
+      expect: '所有登入結果、查詢結果、稽核紀錄的文字裡，都找不到任何人的密碼',
+      run: function () {
+        var db = fresh();
+        var pws = db.users.map(function (u) { return u.password; });
+        var cur = db, text = '';
+        db.users.forEach(function (u) {
+          var r = ERP.login(cur, u.account, u.password);
+          text += JSON.stringify(r.data) + r.message;
+          cur = r.state;
+          var q = ERP.queryStock(cur, u.id, '');
+          text += JSON.stringify(q.data);
+          cur = q.state;
+        });
+        cur = ERP.login(cur, 'ming', 'wrong').state;
+        text += JSON.stringify(cur.audit);
+        pws.forEach(function (p) { expect(text.indexOf(p) < 0, '輸出裡出現了密碼：' + p.slice(0, 2) + '…'); });
+        expect(JSON.stringify(cur.audit).indexOf('wrong') < 0, '稽核紀錄不該記下輸入的密碼');
+        return '7 個帳號登入與查詢後，結果與稽核都沒有密碼';
+      }
+    },
+    {
+      id: 'TC-030-01', rule: 'RULE-030', req: 'REQ-027', branch: 'True',
+      title: '管理員與老闆擁有全部權限',
+      given: '老闆與管理員各做一輪：看成本與毛利、核准、出貨、進貨、新增商品、改價、設定安全庫存',
+      expect: '每一項都成功；查詢結果有成本與毛利',
+      run: function () {
+        var out = [];
+        ['U03', 'U07'].forEach(function (id, k) {
+          var db = fresh();
+          var q = ERP.queryStock(db, id, '205/55R16');
+          expect(q.data.length === 1 && q.data[0].cost === 2650 && q.data[0].margin === 650, id + ' 應該看得到成本與毛利');
+          var sub = submitted(db, 'U01', 'TR-001', 1);
+          var ap = ERP.approveOrder(sub.state, id, sub.id); expect(ap.ok, id + ' 核准：' + ap.message);
+          var sh = ERP.shipOrder(ap.state, id, sub.id); expect(sh.ok, id + ' 出貨：' + sh.message);
+          var rc = ERP.receiveStock(sh.state, id, 'TR-001', 5, ''); expect(rc.ok, id + ' 進貨：' + rc.message);
+          var np = ERP.addProduct(rc.state, id, { brand: '固特異 Goodyear', name: 'Assurance', spec: '195/60R15', year: 2025, cost: 1900, price: 2400, retail: 3100 }); expect(np.ok, id + ' 新增商品：' + np.message);
+          var up = ERP.updateProduct(np.state, id, 'TR-001', { price: 3400, retail: 4400 }); expect(up.ok, id + ' 改價：' + up.message);
+          var sf = ERP.setSafetyStock(up.state, id, 'TR-001', 25); expect(sf.ok, id + ' 設安全庫存：' + sf.message);
+          var lr = ERP.setLowStockRule(sf.state, id, ERP.view.lowRule(sf.state) === 'lt' ? 'le' : 'lt', '測試'); expect(lr.ok, id + ' 改低庫存規則：' + lr.message);
+          invariantsOk(lr.state);
+          out.push(Rules.ROLE[db.users.filter(function (u) { return u.id === id; })[0].role]);
+        });
+        return out.join('、') + '都能看成本，並完成核准、出貨、進貨、新增商品、改價、設安全庫存、改低庫存規則';
+      }
+    },
+    {
+      id: 'TC-030-02', rule: 'RULE-030', req: 'REQ-027', branch: '邊界',
+      title: '員工（業務、倉管、生管）看不到成本與毛利，看得到店家價、末端價、庫存與安全庫存',
+      given: '業務、倉管、生管各查全部庫存；老闆先新增一個有成本的新商品再查',
+      expect: '每一筆結果都有店家價、末端價、在庫、預留、可用、安全庫存，沒有成本和毛利（新商品也一樣）',
+      run: function () {
+        var db = fresh();
+        var np = ERP.addProduct(db, 'U07', { brand: '固特異 Goodyear', name: 'Assurance', spec: '195/60R15', year: 2025, cost: 1900, price: 2400, retail: 3100 });
+        expect(np.ok, '新增商品失敗：' + np.message);
+        var must = ['price', 'retail', 'on_hand', 'reserved', 'available', 'safety'];
+        ['U01', 'U05', 'U06'].forEach(function (id) {
+          var q = ERP.queryStock(np.state, id, '');
+          expect(q.ok && q.data.length === 9, id + ' 應查到 9 筆');
+          q.data.forEach(function (row) {
+            must.forEach(function (k) { expect(Object.prototype.hasOwnProperty.call(row, k), id + ' 缺欄位 ' + k); });
+            expect(!('cost' in row) && !('margin' in row), id + ' 竟然看到成本或毛利');
+          });
+          var tr1 = q.data.filter(function (r) { return r.sku === 'TR-001'; })[0];
+          expect(tr1.price === 3300 && tr1.retail === 4300 && tr1.safety === 20, id + ' 的價格或安全庫存不對');
+          var a = lastAudit(q.state);
+          expect(a.detail.fields.indexOf('cost') < 0 && a.detail.fields.indexOf('safety') >= 0, '稽核記下的欄位不對');
+        });
+        return '業務、倉管、生管都看得到店家價、末端價與安全庫存，看不到成本與毛利';
+      }
+    },
+    {
+      id: 'TC-030-03', rule: 'RULE-030', req: 'REQ-027', branch: 'False',
+      title: '員工做管理動作 → 全部被拒絕，資料不變',
+      given: '業務、倉管、生管各嘗試：核准、拒絕、退回、出貨、進貨、新增商品、改價、設定安全庫存、改低庫存規則',
+      expect: '27 次嘗試全部被拒絕，訊息都以「只有老闆」開頭；庫存、訂單、商品、設定完全不變；每次都留下被拒絕的稽核',
+      run: function () {
+        var base = fresh();
+        var snap = JSON.stringify([base.products, base.orders, base.receipts, base.settings]);
+        var n = 0;
+        ['U01', 'U05', 'U06'].forEach(function (id) {
+          var cur = base;
+          var tries = [
+            function () { return ERP.approveOrder(cur, id, 'SO-0004'); },
+            function () { return ERP.rejectOrder(cur, id, 'SO-0004', 'x'); },
+            function () { return ERP.returnOrder(cur, id, 'SO-0004', 'x'); },
+            function () { return ERP.shipOrder(cur, id, 'SO-0001'); },
+            function () { return ERP.receiveStock(cur, id, 'TR-001', 5, ''); },
+            function () { return ERP.addProduct(cur, id, { brand: 'A', name: 'a', spec: '1/1R1', year: 2025, cost: 1, price: 2, retail: 3 }); },
+            function () { return ERP.updateProduct(cur, id, 'TR-001', { price: 3400 }); },
+            function () { return ERP.setSafetyStock(cur, id, 'TR-001', 30); },
+            function () { return ERP.setLowStockRule(cur, id, 'le', '想改'); }
+          ];
+          tries.forEach(function (go, i) {
+            var r = go();
+            expect(!r.ok && r.message.indexOf('只有老闆') === 0, id + ' 第 ' + (i + 1) + ' 項竟然沒被擋下：' + r.message);
+            expect(JSON.stringify([r.state.products, r.state.orders, r.state.receipts, r.state.settings]) === snap, id + ' 第 ' + (i + 1) + ' 項被擋下後資料還是變了');
+            expect(r.state.audit.length === cur.audit.length + 1 && lastAudit(r.state).ok === false, '沒有留下被拒絕的稽核');
+            cur = r.state;
+            n++;
+          });
+        });
+        return n + ' 次嘗試全部被拒絕，資料不變';
+      }
+    },
+    {
+      id: 'TC-030-04', rule: 'RULE-030', req: 'REQ-027', branch: 'False',
+      title: '只有業務可以叫貨：倉管、生管、老闆、管理員叫貨 → 被拒絕',
+      given: '倉管、生管、老闆、管理員各想把 205/55R16 ×1 加入叫貨單；業務阿明做同樣的事',
+      expect: '前四者被拒絕（訊息「只有業務可以叫貨」）、沒有建立訂單；阿明成功',
+      run: function () {
+        var db = fresh();
+        ['U05', 'U06', 'U03', 'U07'].forEach(function (id) {
+          var r = ERP.addLine(db, id, 'TR-001', 1);
+          expect(!r.ok && r.message === '只有業務可以叫貨' && r.state.orders.length === db.orders.length, id + ' 竟然能叫貨：' + r.message);
+        });
+        var ok = ERP.addLine(db, 'U01', 'TR-001', 1);
+        expect(ok.ok && ok.state.orders.length === db.orders.length + 1, '業務應該能叫貨：' + ok.message);
+        return '倉管、生管、老闆、管理員都不能叫貨；業務可以';
       }
     }
   ];

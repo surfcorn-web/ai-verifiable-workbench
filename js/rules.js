@@ -13,7 +13,7 @@ var Rules = (function () {
   // =====================================================================
   // 標籤（給畫面顯示的白話文字）
   // =====================================================================
-  var ROLE = { sales: '業務', boss: '老闆' };
+  var ROLE = { admin: '管理員', boss: '老闆', sales: '業務', warehouse: '倉管', planner: '生管' };
   var ORDER_STATUS = {
     DRAFT: '購物車', SUBMITTED: '待審核（已預留）', APPROVED: '已核准', REJECTED: '已拒絕',
     RETURNED: '被退回', PARTIALLY_SHIPPED: '部分出貨', SHIPPED: '已出貨', CANCELLED: '已取消'
@@ -30,6 +30,7 @@ var Rules = (function () {
     RETURNED: '老闆退回', RETURN_DENIED: '退回被拒', MIGRATED: '資料升級',
     SHIPPED: '出貨完成', SHIP_DENIED: '出貨被拒', RECEIVED: '進貨入庫', RECEIVE_DENIED: '進貨被拒',
     PRODUCT_ADDED: '新增商品', PRODUCT_UPDATED: '修改價格', PRODUCT_DENIED: '商品異動被拒',
+    LOGIN: '登入', LOGIN_DENIED: '登入失敗', LOGOUT: '登出',
     SAFETY_SET: '設定安全庫存', SAFETY_DENIED: '安全庫存設定被拒', LOWRULE_CHANGED: '修改低庫存規則', LOWRULE_DENIED: '低庫存規則異動被拒'
   };
 
@@ -61,13 +62,35 @@ var Rules = (function () {
   }
 
   function isSales(user) { return !!user && user.role === 'sales'; }
-  function isBoss(user) { return !!user && user.role === 'boss'; }
+  // 管理權限＝管理員或老闆（RULE-030：擁有全部權限）；沿用 isBoss 這個名字，舊程式與測試不用改
+  function isManager(user) { return !!user && (user.role === 'boss' || user.role === 'admin'); }
+  function isBoss(user) { return isManager(user); }
+  // RULE-030 權限表（唯一來源）：ERP 函式用 can() 判斷，登入頁的「各角色能做什麼」表也從這裡產生
+  var PERMS = [
+    { key: 'stock', label: '查庫存（店家價、末端價、庫存、安全庫存）', roles: ['admin', 'boss', 'sales', 'warehouse', 'planner'] },
+    { key: 'cost', label: '看成本與毛利', roles: ['admin', 'boss'] },
+    { key: 'order', label: '叫貨、送出叫貨單', roles: ['sales'] },
+    { key: 'approve', label: '核准、退回、拒絕叫貨單', roles: ['admin', 'boss'] },
+    { key: 'ship', label: '出貨完成', roles: ['admin', 'boss'] },
+    { key: 'receive', label: '進貨', roles: ['admin', 'boss'] },
+    { key: 'product', label: '新增商品、改價（店家價、末端價、成本）', roles: ['admin', 'boss'] },
+    { key: 'safety', label: '設定安全庫存', roles: ['admin', 'boss'] },
+    { key: 'lowrule', label: '改低庫存的算法（要走「變更需求」）', roles: ['admin', 'boss'] }
+  ];
+  function can(user, key) {
+    if (!user) return false;
+    var p = PERMS.filter(function (x) { return x.key === key; })[0];
+    return !!p && p.roles.indexOf(user.role) >= 0;
+  }
+  // 員工＝業務、倉管、生管：看不到成本與毛利（RULE-001、RULE-030）
+  function isStaff(user) { return !!user && (user.role === 'sales' || user.role === 'warehouse' || user.role === 'planner'); }
 
   // RULE-001：業務看到的欄位白名單；用「重新組物件」而不是刪欄位
-  var SALES_FIELDS = ['sku', 'brand', 'name', 'spec', 'year', 'on_hand', 'reserved', 'available', 'price'];
+  // 員工可看的欄位：店家價（price）、末端價（retail）、庫存與安全庫存；沒有 cost、margin
+  var SALES_FIELDS = ['sku', 'brand', 'name', 'spec', 'year', 'on_hand', 'reserved', 'available', 'safety', 'price', 'retail'];
   function viewFor(user, p) {
     var row = {};
-    SALES_FIELDS.forEach(function (f) { row[f] = f === 'available' ? available(p) : p[f]; });
+    SALES_FIELDS.forEach(function (f) { row[f] = f === 'available' ? available(p) : f === 'safety' ? (p.safety || 0) : f === 'retail' ? (p.retail == null ? null : p.retail) : p[f]; });
     if (isBoss(user)) {
       row.cost = p.cost;
       row.margin = p.price - p.cost;
@@ -134,10 +157,12 @@ var Rules = (function () {
     };
     var items = CLOSURE.map(function (c) { return { key: c.key, label: c.label, short: c.short, ok: !!c.ok(r) }; });
     var score = items.filter(function (i) { return i.ok; }).length;
+    var needsReview = !!(rule.ai_draft && !rule.ai_draft.reviewed);
     return {
       items: items, score: score, total: CLOSURE.length,
-      complete: score === CLOSURE.length,
-      missing: items.filter(function (i) { return !i.ok; }).map(function (i) { return i.short; })
+      needsReview: needsReview,
+      complete: score === CLOSURE.length && !needsReview,
+      missing: items.filter(function (i) { return !i.ok; }).map(function (i) { return i.short; }).concat(needsReview ? ['你確認 AI 的建議'] : [])
     };
   }
 
@@ -150,10 +175,12 @@ var Rules = (function () {
     'REQ-001': { text: '業務可用手機查詢輪胎庫存（規格、品牌、可用量）', priority: 'Must', quality: [2, 2, 1, 2, 1, 2, 2] },
     'REQ-002': { text: '業務可把查到的輪胎加入叫貨單並送出審核', priority: 'Must', quality: [2, 2, 2, 1, 1, 2, 2] },
     'REQ-003': { text: '叫貨數量必須為正整數（0、負數、小數不可送出）', priority: 'Must', quality: [2, 2, 2, 2, 2, 2, 1] },
-    'REQ-004': { text: '老闆核准時才檢查可用庫存並建立預留（替代決策）', priority: 'Must', quality: [2, 2, 2, 2, 1, 1, 1], group: 'reserve-timing' },
-    'REQ-004B': { text: '業務送出叫貨單時檢查可用庫存並立即預留，其他業務不可再使用這批額度', priority: 'Must', quality: [2, 2, 2, 2, 1, 2, 2], group: 'reserve-timing' },
+    'REQ-004': { text: '老闆核准時才檢查可用庫存並建立預留（替代決策）', priority: 'Must', quality: [2, 2, 2, 2, 1, 1, 1], group: 'reserve-timing',
+      decision: '未採用：已決定第一版採「送出即預留」（與 REQ-004B 二選一）' },
+    'REQ-004B': { text: '業務送出叫貨單時檢查可用庫存並立即預留，其他業務不可再使用這批額度', priority: 'Must', quality: [2, 2, 2, 2, 1, 2, 2], group: 'reserve-timing',
+      decision: '已決定（2026-10-14）：第一版直接採用「送出即預留」（防止審核期間庫存被別人用掉），不需要再請教授確認' },
     'REQ-005': { text: '可用庫存＝在庫－預留；待審核與已核准的訂單都算預留', priority: 'Must', quality: [2, 2, 2, 2, 2, 2, 2] },
-    'REQ-006': { text: '業務角色不可看到成本與毛利', priority: 'Must', quality: [2, 2, 2, 2, 1, 2, 1] },
+    'REQ-006': { text: '員工（業務、倉管、生管）不可看到成本與毛利，只看得到店家價、末端價、庫存與安全庫存', priority: 'Must', quality: [2, 2, 2, 2, 1, 2, 1] },
     'REQ-007': { text: '老闆可退回待審核訂單，業務修改後重送', priority: 'Must', quality: [2, 2, 2, 1, 1, 2, 1] },
     'REQ-008': { text: '已核准訂單取消時釋放預留', priority: 'Should', quality: [2, 1, 2, 1, 1, 1, 1] },
     'REQ-009': { text: '一鍵複製庫存資訊回覆 LINE', priority: 'Should', quality: [2, 2, 1, 1, 1, 2, 1] },
@@ -179,6 +206,8 @@ var Rules = (function () {
     'REQ-024': { text: '老闆可對已核准的訂單按「出貨完成」：在庫與預留一起扣掉，訂單變「已出貨」', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2] },
     'REQ-025': { text: '老闆可新增商品、修改售價與成本；業務看不到成本', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 1] },
     // Sprint 3 安全庫存警示與規則變更（簡報第 10、17 頁）
+    // 登入與角色權限（2026-10-14 使用者指示）
+    'REQ-027': { text: '登入與角色權限：管理員與老闆擁有全部權限；員工（業務、倉管、生管）看不到成本與毛利，只能查庫存與價格（店家價、末端價），其中業務可叫貨', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2] },
     'REQ-026': { text: '商品可設「安全庫存」；可用庫存低於安全庫存時標示「低庫存」並列入提醒；老闆可設定安全庫存，也可變更「低於」的比較方式（小於或小於等於）', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2] }
   };
   var REQ_ORDER = Object.keys(REQ_CATALOG);
@@ -214,10 +243,10 @@ var Rules = (function () {
 
   var RULE_TEMPLATES = [
     tpl({
-      id: 'RULE-001', title: '業務查庫存，看不到成本', primary: 'REQ-006', reqs: ['REQ-006', 'REQ-001'], difficulty: '權限與敏感資料',
-      if: '查詢的人是業務',
-      t: { action: '只顯示規格、品牌、年份、在庫、預留、可用、售價；不顯示成本和毛利', effect: '只是查詢，庫存不會改變', message: '查到 N 筆', audit: '記下誰查了什麼、顯示了哪些欄位', tests: ['TC-001-01'], final: '查詢結果裡沒有成本' },
-      f: { action: '查詢的人是老闆時，顯示完整欄位（含成本、毛利）', effect: '只是查詢，庫存不會改變', message: '查到 N 筆（含成本）', audit: '記下老闆查詢，並註明含成本', tests: ['TC-001-02'], final: '查詢結果有成本' },
+      id: 'RULE-001', title: '員工查庫存，看不到成本與毛利', primary: 'REQ-006', reqs: ['REQ-006', 'REQ-001'], difficulty: '權限與敏感資料',
+      if: '查詢的人是員工（業務、倉管、生管）',
+      t: { action: '只顯示規格、品牌、年份、在庫、預留、可用、安全庫存、店家價、末端價；不顯示成本和毛利', effect: '只是查詢，庫存不會改變', message: '查到 N 筆', audit: '記下誰查了什麼、顯示了哪些欄位', tests: ['TC-001-01'], final: '查詢結果裡沒有成本' },
+      f: { action: '查詢的人是老闆或管理員時，顯示完整欄位（含成本、毛利）', effect: '只是查詢，庫存不會改變', message: '查到 N 筆（含成本）', audit: '記下老闆或管理員查詢，並註明含成本', tests: ['TC-001-02'], final: '查詢結果有成本' },
       edge: { text: '用「白名單」只挑允許的欄位，而不是事後把成本刪掉；以後新增敏感欄位也不會外洩', tests: [] },
       code: ['ERP.queryStock', 'Rules.viewFor'],
       tasks: [
@@ -282,25 +311,25 @@ var Rules = (function () {
     }),
     tpl({
       id: 'RULE-006', title: '老闆核准待審核的訂單', primary: 'REQ-010', reqs: ['REQ-010'], difficulty: '單據狀態與回滾',
-      if: '訂單目前是「待審核」，而且操作的人是老闆',
+      if: '訂單目前是「待審核」，而且操作的人是老闆或管理員',
       t: { action: '核准；訂單變成「已核准」', effect: '只改訂單狀態；庫存不變（預留在送出時就建立好了）', message: '核准成功', audit: '記下誰核准了哪張單', tests: ['TC-006-01'], final: '已核准' },
-      f: { action: '不能核准（操作的人不是老闆，或訂單不是待審核）', effect: '訂單與庫存完全不變', message: '只有老闆可以核准待審核的訂單', audit: '記下被拒絕的核准', tests: ['TC-006-02'], final: '維持原本的狀態' },
+      f: { action: '不能核准（操作的人不是老闆或管理員，或訂單不是待審核）', effect: '訂單與庫存完全不變', message: '只有老闆或管理員可以核准待審核的訂單', audit: '記下被拒絕的核准', tests: ['TC-006-02'], final: '維持原本的狀態' },
       edge: { text: '已核准的訂單不能重複核准，否則同一批庫存可能被重複計算', tests: [] },
       code: ['ERP.approveOrder', 'Rules.canApprove'],
       tasks: [
-        '實作 ERP.approveOrder(db, userId, orderId)：只有老闆、只處理 SUBMITTED；只改狀態為 APPROVED，不動庫存',
+        '實作 ERP.approveOrder(db, userId, orderId)：只有老闆或管理員、只處理 SUBMITTED；只改狀態為 APPROVED，不動庫存',
         '不是老闆、或訂單不是待審核：拒絕並寫 APPROVE_DENIED 稽核，資料完全不變'
       ]
     }),
     tpl({
       id: 'RULE-007', title: '老闆拒絕待審核的訂單，並釋放預留', primary: 'REQ-010', reqs: ['REQ-010'], difficulty: '單據狀態與回滾',
-      if: '訂單目前是「待審核」，而且操作的人是老闆',
+      if: '訂單目前是「待審核」，而且操作的人是老闆或管理員',
       t: { action: '拒絕；訂單變成「已拒絕」', effect: '釋放這張單預留的數量，可用庫存恢復', message: '已拒絕，預留已釋放', audit: '記下拒絕與原因', tests: ['TC-007-01'], final: '已拒絕（未預留）' },
-      f: { action: '不能拒絕（操作的人不是老闆，或訂單不是待審核）', effect: '訂單與庫存完全不變', message: '只有老闆可以拒絕待審核的訂單', audit: '記下被拒絕的操作', tests: ['TC-007-02'], final: '維持原本的狀態' },
+      f: { action: '不能拒絕（操作的人不是老闆或管理員，或訂單不是待審核）', effect: '訂單與庫存完全不變', message: '只有老闆或管理員可以拒絕待審核的訂單', audit: '記下被拒絕的操作', tests: ['TC-007-02'], final: '維持原本的狀態' },
       edge: { text: '拒絕後一定要把預留還回去，否則庫存會一直被卡住', tests: [] },
       code: ['ERP.rejectOrder', 'Rules.canReject'],
       tasks: [
-        '實作 ERP.rejectOrder(db, userId, orderId, reason)：只有老闆、只處理 SUBMITTED；狀態改 REJECTED，reserved −= qty',
+        '實作 ERP.rejectOrder(db, userId, orderId, reason)：只有老闆或管理員、只處理 SUBMITTED；狀態改 REJECTED，reserved −= qty',
         '不是老闆、或訂單不是待審核：拒絕並寫 REJECT_DENIED 稽核，資料完全不變'
       ]
     }),
@@ -310,7 +339,7 @@ var Rules = (function () {
       t: { action: '取消；訂單變成「已取消」', effect: '釋放預留，可用庫存恢復', message: '已取消並釋放預留', audit: '記下取消', tests: [], final: '已取消' },
       f: { action: '', effect: '庫存與預留不變', message: '只有已核准且還沒出貨的訂單可以取消', audit: '記下被拒絕的取消', tests: [], final: '維持原本的狀態' },
       edge: { text: '部分出貨後取消：只釋放還沒出貨的那一部分', tests: [] },
-      note: 'AI 草稿：缺「不成立時要做什麼」和「驗收案例」，所以被閘門擋下，不會進入開發。'
+      note: 'AI 草稿：缺「不成立時要做什麼」和「驗收案例」，所以先不交給 AI 開發。'
     }),
     tpl({
       id: 'RULE-009', title: '寄庫：購買當下就扣庫存，之後分次取貨', primary: 'REQ-011', reqs: ['REQ-011', 'REQ-017'], difficulty: '例外交易（部分出貨、寄庫）',
@@ -347,38 +376,38 @@ var Rules = (function () {
     }),
     tpl({
       id: 'RULE-021', title: '進貨入庫', primary: 'REQ-019', reqs: ['REQ-019'], difficulty: '盤點與校正',
-      if: '進貨數量是大於 0 的整數，操作的人是老闆，而且商品存在',
+      if: '進貨數量是大於 0 的整數，操作的人是老闆或管理員，而且商品存在',
       t: { action: '進貨：在庫增加，並留下進貨單號', effect: '在庫增加進貨數量；預留不變，所以可用庫存跟著增加', message: '進貨完成：商品 ＋N 條（進貨單 RC-xxxx）', audit: '記下誰、哪個商品、進貨幾條、進貨單號', tests: ['TC-021-01'], final: '在庫已增加，進貨單已留存' },
-      f: { action: '拒絕進貨', effect: '庫存與進貨單完全不變', message: '進貨數量必須為正整數／只有老闆可以進貨', audit: '記下被拒絕的進貨與原因', tests: ['TC-021-02'], final: '庫存不變、沒有進貨單' },
+      f: { action: '拒絕進貨', effect: '庫存與進貨單完全不變', message: '進貨數量必須為正整數／只有老闆或管理員可以進貨', audit: '記下被拒絕的進貨與原因', tests: ['TC-021-02'], final: '庫存不變、沒有進貨單' },
       edge: { text: '同一個商品連續進貨，在庫逐次累加，進貨單號依序不重複', tests: ['TC-021-03'] },
       code: ['ERP.receiveStock'],
       tasks: [
-        '實作 ERP.receiveStock(db, userId, sku, qty, note)：只有老闆；數量用 Rules.isPositiveInt 檢查',
+        '實作 ERP.receiveStock(db, userId, sku, qty, note)：只有老闆或管理員；數量用 Rules.isPositiveInt 檢查',
         '成功：on_hand += qty、寫進貨單（RC-0001 起依序編號）、稽核 RECEIVED；失敗：資料完全不變、稽核 RECEIVE_DENIED'
       ]
     }),
     tpl({
       id: 'RULE-010', title: '出貨完成：在庫與預留一起扣掉', primary: 'REQ-024', reqs: ['REQ-024'], difficulty: '單據狀態與回滾',
-      if: '訂單目前是「已核准」，而且操作的人是老闆',
+      if: '訂單目前是「已核准」，而且操作的人是老闆或管理員',
       t: { action: '出貨完成；訂單變成「已出貨」', effect: '在庫和預留各扣掉訂購條數（預留被用掉）；可用庫存不變', message: '出貨完成（在庫 130 → 128），預留已用掉', audit: '記下誰出貨了哪張單、各品項在庫變化', tests: ['TC-010-01'], final: '已出貨' },
-      f: { action: '不能出貨（不是老闆，或訂單不是已核准）', effect: '訂單與庫存完全不變', message: '只有已核准的訂單可以出貨', audit: '記下被拒絕的出貨與原因', tests: ['TC-010-02'], final: '維持原本的狀態' },
+      f: { action: '不能出貨（不是老闆或管理員，或訂單不是已核准）', effect: '訂單與庫存完全不變', message: '只有已核准的訂單可以出貨', audit: '記下被拒絕的出貨與原因', tests: ['TC-010-02'], final: '維持原本的狀態' },
       edge: { text: '同一張單不能重複出貨，否則在庫會被扣兩次', tests: ['TC-010-03'] },
       code: ['ERP.shipOrder', 'Rules.canShip'],
       tasks: [
-        '實作 ERP.shipOrder(db, userId, orderId)：只有老闆、只處理 APPROVED；每個品項 on_hand −= qty 且 reserved −= qty',
+        '實作 ERP.shipOrder(db, userId, orderId)：只有老闆或管理員、只處理 APPROVED；每個品項 on_hand −= qty 且 reserved −= qty',
         '狀態改 SHIPPED；稽核 SHIPPED；任何一項在庫或預留不足就整張不出貨（SHIP_DENIED），資料完全不變'
       ]
     }),
     tpl({
       id: 'RULE-011', title: '老闆新增商品、修改售價與成本', primary: 'REQ-025', reqs: ['REQ-025'], difficulty: '權限與敏感資料',
-      if: '操作的人是老闆，品牌與規格有填，年份是 4 位數，售價大於 0、成本不是負數，而且不是已經有的商品',
+      if: '操作的人是老闆或管理員，品牌與規格有填，年份是 4 位數，售價大於 0、成本不是負數，而且不是已經有的商品',
       t: { action: '新增商品（在庫從 0 開始），或更新售價與成本', effect: '商品清單多一筆（或價格改變）；其他商品與庫存不變', message: '已新增商品 TR-009（在庫 0，要進貨才有庫存）', audit: '記下新增或改價的人、商品、改前改後的數字', tests: ['TC-011-01'], final: '商品已建立或價格已更新' },
-      f: { action: '拒絕新增或修改', effect: '商品清單與價格完全不變', message: '只有老闆可以新增商品／品牌和規格一定要填／售價要大於 0', audit: '記下被拒絕的操作與原因', tests: ['TC-011-02'], final: '商品清單不變' },
+      f: { action: '拒絕新增或修改', effect: '商品清單與價格完全不變', message: '只有老闆或管理員可以新增商品／品牌和規格一定要填／售價要大於 0', audit: '記下被拒絕的操作與原因', tests: ['TC-011-02'], final: '商品清單不變' },
       edge: { text: '品牌、型號、規格、年份都相同的商品不可重複新增；商品編號依序不跳號', tests: ['TC-011-03'] },
       code: ['ERP.addProduct', 'ERP.updateProduct'],
       tasks: [
-        '實作 ERP.addProduct(db, userId, fields)：只有老闆；檢查必填、年份、價格、不重複；編號為現有最大編號 ＋ 1',
-        '實作 ERP.updateProduct(db, userId, sku, { price, cost })：只有老闆；價格要大於 0；沒有變動也算拒絕',
+        '實作 ERP.addProduct(db, userId, fields)：只有老闆或管理員；檢查必填、年份、價格、不重複；編號為現有最大編號 ＋ 1',
+        '實作 ERP.updateProduct(db, userId, sku, { price, cost })：只有老闆或管理員；價格要大於 0；沒有變動也算拒絕',
         '業務查詢結果仍不可含 cost（RULE-001）'
       ]
     }),
@@ -397,26 +426,53 @@ var Rules = (function () {
     }),
     tpl({
       id: 'RULE-027', title: '老闆設定每個商品的安全庫存', primary: 'REQ-026', reqs: ['REQ-026'], difficulty: '權限與敏感資料',
-      if: '操作的人是老闆，商品存在，安全庫存是 0 或正整數（0 代表不設警示）',
+      if: '操作的人是老闆或管理員，商品存在，安全庫存是 0 或正整數（0 代表不設警示）',
       t: { action: '更新這個商品的安全庫存', effect: '只改這個商品的安全庫存；在庫、預留、價格都不變', message: '已設定 205/55R16 的安全庫存：20 → 30', audit: '記下誰把哪個商品的安全庫存從幾改成幾', tests: ['TC-027-01'], final: '安全庫存已更新' },
-      f: { action: '拒絕設定', effect: '安全庫存完全不變', message: '只有老闆可以設定安全庫存／安全庫存要填 0 或正整數', audit: '記下被拒絕的設定與原因', tests: ['TC-027-02'], final: '安全庫存維持原值' },
+      f: { action: '拒絕設定', effect: '安全庫存完全不變', message: '只有老闆或管理員可以設定安全庫存／安全庫存要填 0 或正整數', audit: '記下被拒絕的設定與原因', tests: ['TC-027-02'], final: '安全庫存維持原值' },
       edge: { text: '設成 0 代表不設警示：這個商品不會再出現在提醒清單', tests: ['TC-027-03'] },
       code: ['ERP.setSafetyStock', 'Rules.isNonNegInt'],
       tasks: [
-        '實作 ERP.setSafetyStock(db, userId, sku, qty)：只有老闆；數量用 Rules.isNonNegInt 檢查',
+        '實作 ERP.setSafetyStock(db, userId, sku, qty)：只有老闆或管理員；數量用 Rules.isNonNegInt 檢查',
         '成功：寫 product.safety、稽核 SAFETY_SET（記前後數字）；失敗：資料完全不變、稽核 SAFETY_DENIED'
       ]
     }),
     tpl({
       id: 'RULE-028', title: '修改低庫存的比較方式（要寫理由，留前後紀錄）', primary: 'REQ-026', reqs: ['REQ-026'], difficulty: '單據狀態與回滾',
-      if: '操作的人是老闆，選的比較方式和目前不同，而且有寫理由',
+      if: '操作的人是老闆或管理員，選的比較方式和目前不同，而且有寫理由',
       t: { action: '改成新的比較方式（小於 或 小於等於）', effect: '只改「低庫存的比較方式」這一個設定；提醒清單依新規則重算；庫存、預留都不變', message: '低庫存規則已改：小於 → 小於或等於', audit: '記下誰把規則從什麼改成什麼，以及理由', tests: ['TC-028-01'], final: '新規則生效，原規則留在紀錄裡，可以回復' },
-      f: { action: '拒絕修改', effect: '設定完全不變', message: '只有老闆可以改／要寫理由／和目前的一樣', audit: '記下被拒絕的修改與原因', tests: ['TC-028-02'], final: '維持原本的規則' },
+      f: { action: '拒絕修改', effect: '設定完全不變', message: '只有老闆或管理員可以改／要寫理由／和目前的一樣', audit: '記下被拒絕的修改與原因', tests: ['TC-028-02'], final: '維持原本的規則' },
       edge: { text: '改過之後可以改回去（回復），回復同樣要寫理由並留下紀錄', tests: [] },
       code: ['ERP.setLowStockRule'],
       tasks: [
-        '實作 ERP.setLowStockRule(db, userId, op, reason)：只有老闆；op 只能是 lt 或 le；理由不可空白；和目前相同要拒絕',
+        '實作 ERP.setLowStockRule(db, userId, op, reason)：只有老闆或管理員；op 只能是 lt 或 le；理由不可空白；和目前相同要拒絕',
         '成功：寫 db.settings.low_stock_op、稽核 LOWRULE_CHANGED（記前後與理由）；失敗：設定完全不變、稽核 LOWRULE_DENIED'
+      ]
+    }),
+    tpl({
+      id: 'RULE-029', title: '登入：帳號與密碼正確才能進入', primary: 'REQ-027', reqs: ['REQ-027'], difficulty: '權限與敏感資料',
+      if: '輸入的帳號存在，而且密碼正確',
+      t: { action: '登入成功，進入系統；畫面依角色顯示', effect: '只多一筆登入紀錄；庫存、訂單都不變', message: '登入成功：王老闆（老闆）', audit: '記下誰登入了', tests: ['TC-029-01'], final: '已登入，權限依角色決定' },
+      f: { action: '不登入，也不說明是帳號錯還是密碼錯', effect: '資料完全不變（只多一筆失敗紀錄）', message: '帳號或密碼不正確', audit: '記下失敗的登入（輸入的帳號、時間）', tests: ['TC-029-02'], final: '維持未登入' },
+      edge: { text: '密碼不會出現在登入結果、查詢結果與稽核紀錄裡；空白的帳號或密碼一律當成失敗', tests: ['TC-029-03'] },
+      code: ['ERP.login', 'ERP.logout'],
+      tasks: [
+        '實作 ERP.login(db, account, password)：帳號不分大小寫；密碼要完全相符；失敗時不透露是哪一個錯',
+        '成功：稽核 LOGIN（記使用者）；失敗：資料完全不變、稽核 LOGIN_DENIED；回傳資料不含密碼',
+        '實作 ERP.logout(db, userId)：稽核 LOGOUT',
+        '提醒：這是前端示範用登入，不是真正的資安防護（沒有伺服器端驗證）'
+      ]
+    }),
+    tpl({
+      id: 'RULE-030', title: '角色權限：管理員與老闆全部，員工只能查詢（業務可叫貨）', primary: 'REQ-027', reqs: ['REQ-027', 'REQ-006'], difficulty: '權限與敏感資料',
+      if: '操作的人是管理員或老闆（管理權限），或是員工（業務、倉管、生管），而且這個動作在他的權限內',
+      t: { action: '照常執行：管理員與老闆全部都可以；員工只能查庫存，業務另外可以叫貨', effect: '依各項功能自己的規則改資料', message: '（依各項功能的成功訊息）', audit: '記下是誰做的', tests: ['TC-030-01'], final: '依各項功能的規則' },
+      f: { action: '拒絕：沒有權限的動作（核准、出貨、進貨、新增商品、改價、設定安全庫存、倉管與生管叫貨）', effect: '資料完全不變', message: '只有老闆或管理員可以…／只有業務可以叫貨', audit: '記下被拒絕的操作與原因', tests: ['TC-030-03', 'TC-030-04'], final: '維持原本的狀態' },
+      edge: { text: '員工看得到店家價、末端價、庫存與安全庫存，但看不到成本與毛利；這個限制由查詢函式負責，不是只靠畫面把欄位藏起來', tests: ['TC-030-02'] },
+      code: ['Rules.isManager', 'Rules.isStaff', 'Rules.viewFor', 'ERP.queryStock'],
+      tasks: [
+        '角色以 db.users 為準，不信任畫面傳入的角色；管理權限＝admin 或 boss（Rules.isManager）',
+        '員工的查詢結果用白名單欄位（Rules.SALES_FIELDS），不含 cost、margin',
+        '管理動作（核准、拒絕、退回、出貨、進貨、新增商品、改價、設定安全庫存、改低庫存規則）只有管理權限可做；叫貨只有業務可做'
       ]
     }),
     tpl({
@@ -436,6 +492,84 @@ var Rules = (function () {
       if: '匯入的 Excel 與目前資料相比，沒有「不可修改的欄位」被改動', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
     })
   ];
+
+  // =====================================================================
+  // AI 建議草稿：只補「還是空白」的欄位；補完要由人按「我看過了」確認，規則才算寫完整
+  // 驗收案例不在這裡寫死：由 deriveCases 依規則內容整理出來
+  var AI_DRAFTS = {
+    'RULE-008': {
+      f: { action: '不取消，訂單維持原本的狀態' }
+    },
+    'RULE-015': {
+      t: { effect: '只是產生文字，不改任何資料', message: '已複製回覆文字（規格、可用數量、店家價；不含成本）', audit: '記下誰複製了哪些品項', final: '資料不變' },
+      f: { action: '不產生回覆文字，提醒先選品項', effect: '不改任何資料', message: '請先在查詢結果選至少一個品項', audit: '記下沒選品項的操作', final: '資料不變' }
+    },
+    'RULE-016': {
+      t: { action: '依生產日期距今，在庫存表標上庫齡顏色：1 年內綠色、1–2 年黃色、2–3 年橘色', effect: '只改畫面顏色，不改任何庫存資料', message: '庫齡：N 個月（顏色）', audit: '只是顯示，不另留紀錄', final: '資料不變' },
+      f: { action: '沒有生產日期或超過 3 年：標示「無法計算庫齡」', effect: '只改畫面顯示，不改任何庫存資料', message: '無法計算庫齡', audit: '只是顯示，不另留紀錄', final: '資料不變' }
+    },
+    'RULE-017': {
+      t: { action: '照常接受送出並預留，訂單變成「待審核」，隔天由老闆審核', effect: '「預留」增加，可用庫存減少（和上班時間一樣）', message: '已送出並預留，老闆上班後會審核', audit: '記下送出的時間，並註明「營業時間外」', final: '待審核（已預留）' },
+      f: { action: '營業時間內送出：照一般流程送出並預留', effect: '「預留」增加，可用庫存減少', message: '已送出並預留，等待老闆核准', audit: '記下送出', final: '待審核（已預留）' }
+    },
+    'RULE-018': {
+      t: { action: '出貨時從這個批次扣庫存', effect: '這個批次的在庫與預留一起減少出貨的條數；其他批次不變', message: '已從批次 XXXX 出貨 N 條', audit: '記下哪個批次、出貨幾條', final: '已出貨' },
+      f: { action: '不能從這個批次出貨，請改選其他批次或減少數量', effect: '所有批次的庫存完全不變', message: '這個批次可用數量不足（剩 N）', audit: '記下被拒絕的出貨與批次', final: '維持已核准' }
+    },
+    'RULE-019': {
+      t: { action: '接受這筆明細，三個數字都記下來', effect: '訂單記下訂購數、當次出貨數、客戶寄庫數', message: '明細已記錄', audit: '記下三個數字', final: '明細完成' },
+      f: { action: '不接受這筆明細，請修正數字', effect: '訂單與庫存完全不變', message: '當次出貨數 ＋ 客戶寄庫數必須等於訂購數', audit: '記下被拒絕的明細與原因', final: '維持原本的狀態' }
+    },
+    'RULE-020': {
+      t: { action: '取消出貨；訂單變成「已取消」', effect: '依原批次把出貨的條數加回在庫', message: '已取消出貨，庫存已依原批次復原', audit: '記下誰取消、復原了哪些批次與條數', final: '已取消' },
+      f: { action: '不是「已出貨」的訂單，不能取消出貨', effect: '庫存完全不變', message: '只有已出貨的訂單才能取消出貨', audit: '記下被拒絕的取消', final: '維持原本的狀態' }
+    },
+    'RULE-022': {
+      t: { action: '把在庫改成實際盤點數，並留下校正紀錄', effect: '在庫＝盤點數（預留不變）；紀錄「校正前、校正後、差異」', message: '已校正：原 N 條 → 實際 M 條', audit: '記下誰、哪個商品、校正前後的數字與原因', final: '庫存已校正（可取消並回復）' },
+      f: { action: '不校正', effect: '庫存與校正紀錄完全不變', message: '盤點數必須是 0 或更大的整數', audit: '記下被拒絕的校正', final: '庫存不變' },
+      edge: '盤點數如果比已預留的數量還少，不能校正（要先處理預留的訂單）'
+    },
+    'RULE-023': {
+      t: { action: '把這些條數從來源倉移到目的倉', effect: '來源倉在庫減少、目的倉在庫增加，總在庫不變；預留與寄庫的不動', message: '已移庫：來源倉 −N 條、目的倉 ＋N 條', audit: '記下誰、從哪個倉移到哪個倉、幾條', final: '移庫完成' },
+      f: { action: '不移庫', effect: '兩邊倉庫的庫存完全不變', message: '移庫數量超過來源倉的可用數量（剩 N 條）', audit: '記下被拒絕的移庫', final: '庫存不變' }
+    },
+    'RULE-024': {
+      t: { action: '接受這個實際售價，記在這一筆交易上', effect: '只改這一筆明細的成交價，不改商品的牌價', message: '已使用實際售價', audit: '記下牌價、實際售價、是誰改的', final: '明細已記錄實際售價' },
+      f: { action: '不接受，維持預設的牌價 9 折', effect: '成交價維持預設，商品牌價不變', message: '實際售價必須是大於 0 的數字', audit: '記下被拒絕的售價', final: '維持預設 9 折' }
+    },
+    'RULE-025': {
+      t: { action: '顯示差異清單，老闆確認後才套用匯入', effect: '確認前不改任何資料；確認後只更新有差異、而且允許修改的欄位', message: '找到 N 筆差異，請確認後再匯入', audit: '記下誰匯入、哪個檔案、改了哪幾筆', final: '匯入完成（可由備份還原）' },
+      f: { action: '整份都不匯入，並列出被改動的「不可修改的欄位」', effect: '資料完全不變', message: '有不可修改的欄位被改動（例如商品編號），整份不匯入', audit: '記下被拒絕的匯入與原因', final: '資料不變' },
+      edge: '匯入前先自動備份，出錯時可以還原'
+    }
+  };
+
+  function stripEnd(s) { return String(s == null ? '' : s).replace(/[。；;，,\s]+$/, ''); }
+
+  // 依規則內容整理驗收案例：成立、不成立各一個（那一邊已經有案例就跳過）
+  function deriveCases(rule) {
+    var out = [];
+    if (!filled(rule.if)) return out;
+    [['t', '成立'], ['f', '不成立']].forEach(function (p) {
+      var s = rule[p[0]] || {};
+      if (list(s.tests).length || !filled(s.action)) return;
+      var given = (p[0] === 't' ? '下面這個情況成立時：' : '反過來，下面這個情況不成立時：') + stripEnd(rule.if);
+      var expect = stripEnd(s.action) + (filled(s.effect) ? '；' + stripEnd(s.effect) : '') + (filled(s.message) ? '；畫面顯示「' + stripEnd(s.message) + '」' : '');
+      out.push({ side: p[0], given: given, expect: expect });
+    });
+    return out;
+  }
+
+  // AI 還有沒有東西可以幫忙補（草稿裡有空白欄位，或有一邊可以整理驗收案例）
+  function aiCanHelp(rule) {
+    var d = AI_DRAFTS[rule.id] || {};
+    var empty = false;
+    ['t', 'f'].forEach(function (side) {
+      Object.keys(d[side] || {}).forEach(function (k) { if (!filled((rule[side] || {})[k])) empty = true; });
+    });
+    if (d.edge && !filled((rule.edge || {}).text)) empty = true;
+    return empty || deriveCases(rule).length > 0;
+  }
 
   // =====================================================================
   // ERP 九大難點（AI 必問的問題）、訂單狀態機、RRB
@@ -601,6 +735,7 @@ var Rules = (function () {
         add('REQ-024', 'ai', '核准之後要有「出貨完成」這一步，在庫才會真正減少', 'AI 流程走查', inferred);
         add('REQ-025', 'ai', '', 'AI 流程走查', inferred);
         add('REQ-026', 'ai', '', 'AI 流程走查', inferred);
+        add('REQ-027', 'ai', '', 'AI 流程走查', inferred);
         REF_CANDIDATES.forEach(function (id) { add(id, 'ai', '', REF_SOURCE, REF_EVIDENCE[id]); });
         var early = wb.requirements.some(function (r) { return r.id === 'REQ-004B' && r.status === 'pending'; });
         qs.push('老闆退回或拒絕時，預留要不要釋放？' + (early ? '（送出就預留 → AI 建議：要釋放，否則庫存會被卡住）' : '（核准才預留 → 退回時還沒預留，AI 建議：不用釋放）'));
@@ -641,6 +776,13 @@ var Rules = (function () {
     return 'v' + m[1] + '.' + m[2] + '.' + (Number(m[3]) + 1);
   }
 
+  // 使用者用白話寫的驗收案例（還沒有自動測試的那種）
+  function draftOf(rule, id) { return ((rule && rule.drafts) || []).filter(function (d) { return d.id === id; })[0] || null; }
+  function pendingDrafts(db) {
+    var out = [];
+    db.wb.rules.forEach(function (rule) { (rule.drafts || []).forEach(function (d) { if (!testCase(d.id)) out.push({ rule: rule, draft: d }); }); });
+    return out;
+  }
   function testCase(id) { return (typeof Tests !== 'undefined' && Tests.byId) ? Tests.byId(id) : null; }
   function implemented(rule) {
     var ids = testIds(rule);
@@ -682,7 +824,7 @@ var Rules = (function () {
     if (confirmed.some(function (r) { return r.id === 'REQ-024'; })) S.push('- 出貨（RULE-010）：老闆按「出貨完成」時，在庫與預留各扣訂購數，可用庫存不變；不可重複出貨');
     if (confirmed.some(function (r) { return r.id === 'REQ-019'; })) S.push('- 進貨（RULE-021）：老闆進貨使在庫增加並留下進貨單號（RC-0001 起依序）');
     if (confirmed.some(function (r) { return r.id === 'REQ-026'; })) S.push('- 低庫存警示（RULE-026／027／028）：商品有安全庫存（> 0）且可用庫存「小於」（預設）或「小於或等於」安全庫存時標示低庫存；比較方式存在 settings.low_stock_op，只有老闆能改，要寫理由並留稽核');
-    S.push('- 角色：sales（業務）、boss（老闆）', '');
+    S.push('- 角色：admin（管理員）、boss（老闆）有全部權限；sales（業務）、warehouse（倉管）、planner（生管）是員工，看不到成本與毛利，只看得到店家價、末端價、庫存與安全庫存' + (confirmed.some(function (r) { return r.id === 'REQ-027'; }) ? '；需登入（RULE-029），權限依角色（RULE-030）' : ''), '');
     S.push('## 5. IF 閉環規則（可進入開發）', '');
     parts.ready.forEach(function (r) {
       S.push('### ' + r.id + ' ' + r.title + '（' + r.reqs.join('、') + '）', '');
@@ -727,6 +869,7 @@ var Rules = (function () {
         var c = testCase(id);
         var branch = r.t.tests.indexOf(id) >= 0 ? 'True' : r.f.tests.indexOf(id) >= 0 ? 'False' : '邊界';
         if (c) X.push('| ' + id + ' | ' + r.id + ' | ' + branch + ' | ' + c.title + ' | ' + c.given + ' | ' + c.expect + ' | 已實作 |');
+        else if (draftOf(r, id)) { var d = draftOf(r, id); X.push('| ' + id + ' | ' + r.id + ' | ' + branch + ' | （使用者寫的例子） | ' + String(d.given).replace(/[|\n]/g, '／') + ' | ' + String(d.expect).replace(/[|\n]/g, '／') + ' | 待實作 |'); }
         else X.push('| ' + id + ' | ' + r.id + ' | ' + branch + ' | （待撰寫） | | | 待實作 |');
       });
     });
@@ -740,7 +883,7 @@ var Rules = (function () {
     A.push('2. 每個 js 檔掛一個全域物件：SEED、Store、Rules、ERP、Tests、App；載入順序 data→store→rules→erp→tests→app。');
     A.push('3. 資料存 localStorage，key = aiwb_state_v01；可重設回 SEED。介面繁體中文，用白話，使用者不懂程式。');
     A.push('4. ERP 函式第一個參數為 db，回傳 { ok, message, state }，並寫 audit。畫面不可直接改資料。');
-    A.push('5. 不可為了讓測試通過而修改 tests.js，除非使用者同意。');
+    A.push('5. 不可為了讓測試通過而修改 tests.js 裡既有的案例，除非使用者同意。TESTS.md 中狀態是「待實作」的案例，請新增到 tests.js（沿用同一個編號、照「前提」與「預期」寫），先寫測試再實作功能。');
     A.push('6. 只實作閉環 8／8 的規則：' + (parts.ready.map(function (r) { return r.id; }).join('、') || '（無）') + '。');
     if (parts.blocked.length) A.push('7. 下列規則被閘門擋下，不可實作：' + parts.blocked.map(function (b) { return b.rule.id; }).join('、') + '。');
     A.push((parts.blocked.length ? '8' : '7') + '. 每完成一步：說明如何驗收 → 等使用者確認 → 才 commit。', '');
@@ -784,6 +927,57 @@ var Rules = (function () {
     };
   }
 
+  // =====================================================================
+  // 7. 版本比較：任兩個版本（或「目前的內容」）之間改了什麼，用白話列出
+  // =====================================================================
+  function ruleSig(r) {
+    var s = JSON.stringify([r.title, r.if, r.t, r.f, r.edge]), h = 5381;
+    for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+  function clip(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n) + '…' : s; }
+
+  // 「目前的內容」，格式和版本紀錄一樣，才能拿來和任一版比
+  function snapshotView(db) {
+    var run = lastRun(db);
+    return {
+      id: '目前',
+      reqs: db.wb.requirements.map(function (r) { return { id: r.id, status: r.status, text: r.text }; }),
+      rules: db.wb.rules.map(function (r) { var c = check(r); return { id: r.id, title: r.title, score: c.score, complete: c.complete, sig: ruleSig(r) }; }),
+      settings: { low_stock_op: db.settings && db.settings.low_stock_op === 'le' ? 'le' : 'lt' },
+      tests: run ? { pass: run.pass, total: run.total } : null
+    };
+  }
+
+  // 回傳 [{ kind: 'req'|'rule'|'setting'|'test', text }]；kind 只是分類，text 是給人看的白話
+  function diffVersions(a, b) {
+    var out = [];
+    var byId = function (list) { var m = {}; (list || []).forEach(function (x) { m[x.id] = x; }); return m; };
+    var ra = byId(a.reqs), rb = byId(b.reqs);
+    Object.keys(rb).forEach(function (id) {
+      var y = rb[id], x = ra[id];
+      if (!x) { out.push({ kind: 'req', text: '新增需求：' + clip(y.text, 30) + '（' + REQ_STATUS[y.status] + '）' }); return; }
+      if (x.text !== y.text) out.push({ kind: 'req', text: '需求說法改了：「' + clip(x.text, 24) + '」→「' + clip(y.text, 24) + '」' });
+      if (x.status !== y.status) out.push({ kind: 'req', text: '需求「' + clip(y.text, 22) + '」：' + REQ_STATUS[x.status] + ' → ' + REQ_STATUS[y.status] });
+    });
+    Object.keys(ra).forEach(function (id) { if (!rb[id]) out.push({ kind: 'req', text: '少了需求：' + clip(ra[id].text, 30) }); });
+    var ua = byId(a.rules), ub = byId(b.rules);
+    Object.keys(ub).forEach(function (id) {
+      var y = ub[id], x = ua[id];
+      if (!x) { out.push({ kind: 'rule', text: '新增規則：' + y.title }); return; }
+      if (!x.complete && y.complete) out.push({ kind: 'rule', text: '規則寫完整了：' + y.title });
+      else if (x.complete && !y.complete) out.push({ kind: 'rule', text: '規則變得不完整：' + y.title });
+      if (x.sig && y.sig && x.sig !== y.sig) out.push({ kind: 'rule', text: '規則內容改了：' + y.title });
+    });
+    Object.keys(ua).forEach(function (id) { if (!ub[id]) out.push({ kind: 'rule', text: '少了規則：' + ua[id].title }); });
+    if (a.settings && b.settings && a.settings.low_stock_op !== b.settings.low_stock_op) {
+      out.push({ kind: 'setting', text: '低庫存提醒的算法：' + LOW_OPS[a.settings.low_stock_op].short + ' → ' + LOW_OPS[b.settings.low_stock_op].short });
+    }
+    var pa = a.tests ? a.tests.pass : null, pb = b.tests ? b.tests.pass : null;
+    if (pa !== pb) out.push({ kind: 'test', text: '通過的驗收：' + (pa == null ? '還沒測' : pa + ' 項') + ' → ' + (pb == null ? '還沒測' : pb + ' 項') });
+    return out;
+  }
+
   function lastRun(db) { var r = db.wb.testRuns; return r.length ? r[r.length - 1] : null; }
   function passedIn(run, id) { return !!run && run.results.some(function (x) { return x.id === id && x.pass; }); }
 
@@ -805,7 +999,7 @@ var Rules = (function () {
       { key: 'exceptions', label: '例外情況都測過', auto: true, ok: falseTests.length > 0 && falseTests.every(function (id) { return passedIn(run, id); }), hint: '「條件不成立」與特殊情況的驗收案例，最近一次測試都通過' },
       { key: 'terms', label: '陌生名詞都查證過', auto: false, ok: manual('terms'), hint: '例：寄庫、銷帳、庫齡的意思已和業者確認' },
       { key: 'calc', label: '計算有用程式驗算', auto: true, ok: passedIn(run, 'TC-003-01'), hint: '「可用 = 在庫 − 預留」由驗收案例驗算' },
-      { key: 'auth', label: '權限相關的程式由人看過', auto: false, ok: manual('auth'), hint: '人工確認業務看不到成本、只有老闆能核准' },
+      { key: 'auth', label: '權限相關的程式由人看過', auto: false, ok: manual('auth'), hint: '人工確認員工看不到成本、只有老闆與管理員能核准' },
       { key: 'git', label: '程式已用 Git 存檔並寫了說明', auto: false, ok: manual('git'), hint: '存檔說明用 feat:／fix:／test:／docs: 開頭' },
       { key: 'agents', label: '交接說明（AGENTS.md）已更新', auto: false, ok: manual('agents'), hint: '寫給下一個 AI 工程師看的說明' }
     ];
@@ -815,15 +1009,16 @@ var Rules = (function () {
     ROLE: ROLE, ORDER_STATUS: ORDER_STATUS, REQ_STATUS: REQ_STATUS, REQ_MOVES: REQ_MOVES,
     PRIORITY_LABEL: PRIORITY_LABEL, ACTION_LABEL: ACTION_LABEL,
     available: available, parseQty: parseQty, isPositiveInt: isPositiveInt, isNonNegInt: isNonNegInt, LOW_OPS: LOW_OPS, isLowStock: isLowStock,
-    isSales: isSales, isBoss: isBoss, SALES_FIELDS: SALES_FIELDS, viewFor: viewFor,
+    isSales: isSales, isBoss: isBoss, isManager: isManager, isStaff: isStaff, PERMS: PERMS, can: can, SALES_FIELDS: SALES_FIELDS, viewFor: viewFor,
     RESERVING: RESERVING, canReturn: canReturn, canApprove: canApprove, canReject: canReject, canShip: canShip, canEdit: canEdit,
-    CLOSURE: CLOSURE, check: check, testIds: testIds, parseTestIds: parseTestIds,
+    CLOSURE: CLOSURE, AI_DRAFTS: AI_DRAFTS, deriveCases: deriveCases, aiCanHelp: aiCanHelp, draftOf: draftOf, pendingDrafts: pendingDrafts, check: check, testIds: testIds, parseTestIds: parseTestIds,
     QUALITY: QUALITY, REQ_CATALOG: REQ_CATALOG, REQ_ORDER: REQ_ORDER, qualityScore: qualityScore,
     REF_SOURCE: REF_SOURCE, REF_EVIDENCE: REF_EVIDENCE, REF_CANDIDATES: REF_CANDIDATES,
     RULE_TEMPLATES: RULE_TEMPLATES, DIFFICULTIES: DIFFICULTIES, STATE_MACHINE: STATE_MACHINE, RRB: RRB,
     DONE_STEP: DONE_STEP, DEFAULT_NEED: DEFAULT_NEED,
     interviewChips: interviewChips, interviewRespond: interviewRespond, buildBlockers: buildBlockers, buildBlockerItems: buildBlockerItems,
     nextVersion: nextVersion, implemented: implemented, partition: partition, devpack: devpack,
-    lastRun: lastRun, checklist: checklist, impactOf: impactOf
+    lastRun: lastRun, checklist: checklist, impactOf: impactOf,
+    ruleSig: ruleSig, snapshotView: snapshotView, diffVersions: diffVersions
   };
 })();
