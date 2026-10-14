@@ -363,7 +363,7 @@ var ERP = (function () {
     var dup = s.products.filter(function (p) { return key(p) === key({ brand: brand, name: name, spec: spec, year: year }); })[0];
     if (dup) return deny(s, u, 'PRODUCT_DENIED', 'RULE-011', dup.sku, '已經有這個商品了（' + dup.sku + '），不能重複新增');
     var sku = nextSku(s);
-    s.products.push({ sku: sku, brand: brand, name: name, spec: spec, year: year, on_hand: 0, reserved: 0, cost: cost, price: price });
+    s.products.push({ sku: sku, brand: brand, name: name, spec: spec, year: year, on_hand: 0, reserved: 0, cost: cost, price: price, safety: 0 });
     s.seq.product = Number(sku.slice(3)) + 1;
     var msg = '已新增商品 ' + sku + '：' + spec + ' ' + brand + (name ? ' ' + name : '') + '（在庫 0，要進貨才有庫存）';
     audit(s, u, 'PRODUCT_ADDED', 'RULE-011', sku, true, msg, { sku: sku });
@@ -386,6 +386,45 @@ var ERP = (function () {
     p.cost = cost;
     audit(s, u, 'PRODUCT_UPDATED', 'RULE-011', sku, true, msg, { sku: sku });
     return result(true, msg, s);
+  }
+
+  // ---------------------------------------------------------------------
+  // RULE-027 設定安全庫存：只有老闆；0 或正整數（0 代表不設警示）
+  // ---------------------------------------------------------------------
+  function setSafetyStock(db, userId, sku, qty) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    if (!Rules.isBoss(u)) return deny(s, u, 'SAFETY_DENIED', 'RULE-027', sku, '只有老闆可以設定安全庫存');
+    var p = findProduct(s, sku);
+    if (!p) return deny(s, u, 'SAFETY_DENIED', 'RULE-027', sku, '找不到品項 ' + sku);
+    if (!Rules.isNonNegInt(qty)) return deny(s, u, 'SAFETY_DENIED', 'RULE-027', sku, '安全庫存要填 0 或正整數', { qty: String(qty) });
+    var n = Rules.parseQty(qty);
+    var before = p.safety || 0;
+    p.safety = n;
+    var msg = '已設定 ' + p.spec + ' 的安全庫存：' + before + ' → ' + n + (n === 0 ? '（0 ＝不設警示）' : '');
+    audit(s, u, 'SAFETY_SET', 'RULE-027', sku, true, msg, { sku: sku, before: before, after: n });
+    return result(true, msg, s, { before: before, after: n });
+  }
+
+  // ---------------------------------------------------------------------
+  // RULE-028 修改低庫存的比較方式：只有老闆；要寫理由；和目前相同要拒絕；留下前後紀錄
+  // ---------------------------------------------------------------------
+  function lowOp(db) { return db.settings && db.settings.low_stock_op === 'le' ? 'le' : 'lt'; }
+
+  function setLowStockRule(db, userId, op, reason) {
+    var s = clone(db);
+    var u = findUser(s, userId);
+    if (!Rules.isBoss(u)) return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '只有老闆可以修改低庫存規則');
+    if (op !== 'lt' && op !== 'le') return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '比較方式只能選「小於」或「小於或等於」', { op: String(op) });
+    var why = String(reason || '').trim();
+    if (!why) return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '要寫下為什麼要改（理由會留在紀錄裡）');
+    var before = lowOp(s);
+    if (before === op) return deny(s, u, 'LOWRULE_DENIED', 'RULE-028', 'low_stock_op', '目前就是「' + Rules.LOW_OPS[op].short + '」，沒有需要修改');
+    s.settings = s.settings || {};
+    s.settings.low_stock_op = op;
+    var msg = '低庫存規則已改：' + Rules.LOW_OPS[before].short + ' → ' + Rules.LOW_OPS[op].short + '（理由：' + why + '）';
+    audit(s, u, 'LOWRULE_CHANGED', 'RULE-028', 'low_stock_op', true, msg, { before: before, after: op, reason: why });
+    return result(true, msg, s, { before: before, after: op });
   }
 
   // ---------------------------------------------------------------------
@@ -419,6 +458,14 @@ var ERP = (function () {
     receipts: function (db, limit) {
       return (db.receipts || []).slice(-(limit || 10)).reverse();
     },
+    // RULE-026 低庫存提醒清單（依 db.settings.low_stock_op；唯讀）
+    lowStock: function (db) {
+      var op = lowOp(db);
+      return db.products.filter(function (p) { return Rules.isLowStock(p, op); }).map(function (p) {
+        return { sku: p.sku, spec: p.spec, brand: p.brand, name: p.name, available: Rules.available(p), safety: p.safety };
+      });
+    },
+    lowRule: function (db) { return lowOp(db); },
     // 老闆待審核（預留都已建立）
     pending: function (db, userId) {
       if (!Rules.isBoss(findUser(db, userId))) return [];
@@ -457,6 +504,8 @@ var ERP = (function () {
     shipOrder: shipOrder,
     receiveStock: receiveStock,
     addProduct: addProduct,
+    setSafetyStock: setSafetyStock,
+    setLowStockRule: setLowStockRule,
     updateProduct: updateProduct,
     view: view
   };

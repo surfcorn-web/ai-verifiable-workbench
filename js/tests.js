@@ -1,4 +1,4 @@
-/* tests.js — 驗收測試（每條規則的「成立」和「不成立」都要 PASS）：第一版 13 個＋Sprint 1 進出貨與商品管理 9 個
+/* tests.js — 驗收測試（每條規則的「成立」和「不成立」都要 PASS）：第一版 13 個＋Sprint 1 進出貨與商品管理 9 個＋Sprint 3 安全庫存警示與規則變更 9 個
  * 全域物件：Tests
  * - 每個案例都從 SEED 的複本開始，不碰 localStorage。
  * - 2026-10-13 使用者決定改為「送出即預留」（REQ-004B），本檔依新規則改寫（使用者已同意修改 tests.js）。
@@ -8,7 +8,13 @@
 var Tests = (function () {
   'use strict';
 
-  function fresh() { return Store.clone(SEED); }
+  // 驗收案例都從 SEED 的複本開始；runAll(config) 可以帶入「目前的規則設定」（config.settings），讓回歸測試用新規則重跑
+  var config = {};
+  function fresh() {
+    var db = Store.clone(SEED);
+    if (config.settings) db.settings = Store.clone(config.settings);
+    return db;
+  }
   function product(db, sku) { return db.products.filter(function (p) { return p.sku === sku; })[0]; }
   function order(db, id) { return db.orders.filter(function (o) { return o.id === id; })[0]; }
   function avail(db, sku) { return Rules.available(product(db, sku)); }
@@ -499,6 +505,170 @@ var Tests = (function () {
         invariantsOk(b.state);
         return '編號 TR-009、TR-010，沒有跳號';
       }
+    },
+    {
+      id: 'TC-026-01', rule: 'RULE-026', req: 'REQ-026', branch: 'True',
+      title: '可用庫存低於安全庫存 → 標示低庫存',
+      given: '225/45R17 可用只有 1、安全庫存 5；235/45R18 可用 0、安全庫存 5',
+      expect: '這兩個品項都出現在低庫存提醒清單，清單帶有可用與安全庫存的數字；庫存本身不變',
+      run: function () {
+        var db = fresh();
+        var before = stock(db);
+        var low = ERP.view.lowStock(db);
+        var skus = low.map(function (x) { return x.sku; });
+        expect(skus.indexOf('TR-002') >= 0 && skus.indexOf('TR-005') >= 0, '應該提醒 TR-002、TR-005，實際：' + skus.join(','));
+        var r = low.filter(function (x) { return x.sku === 'TR-002'; })[0];
+        expect(r.available === 1 && r.safety === 5, '清單上的數字不對：' + JSON.stringify(r));
+        expect(stock(db) === before, '查看提醒不應該改動庫存');
+        return '提醒清單：' + low.map(function (x) { return x.spec + ' 可用 ' + x.available + '／安全 ' + x.safety; }).join('；');
+      }
+    },
+    {
+      id: 'TC-026-02', rule: 'RULE-026', req: 'REQ-026', branch: 'False',
+      title: '可用庫存夠多、或沒設安全庫存 → 不提醒',
+      given: '205/55R16 可用 124（安全庫存 20）；185/65R15 可用 80（安全庫存 30）；新增一個沒設安全庫存的商品',
+      expect: '這三個都不在提醒清單；沒設安全庫存（0）的商品就算可用是 0 也不提醒',
+      run: function () {
+        var db = fresh();
+        var skus = ERP.view.lowStock(db).map(function (x) { return x.sku; });
+        expect(skus.indexOf('TR-001') < 0 && skus.indexOf('TR-007') < 0, '庫存夠多卻被提醒：' + skus.join(','));
+        var a = ERP.addProduct(db, 'U03', { brand: '固特異 Goodyear', name: 'Assurance', spec: '195/60R15', year: 2025, cost: 1900, price: 2400 });
+        expect(a.ok && a.state.products[a.state.products.length - 1].safety === 0, '新商品的安全庫存應該是 0');
+        expect(ERP.view.lowStock(a.state).every(function (x) { return x.sku !== a.data.sku; }), '沒設安全庫存的商品不該被提醒');
+        return '205/55R16、185/65R15 與沒設安全庫存的新商品都沒有被提醒';
+      }
+    },
+    {
+      id: 'TC-026-03', rule: 'RULE-026', req: 'REQ-026', branch: '邊界',
+      title: '可用剛好等於安全庫存 → 依「目前規則」決定要不要提醒',
+      given: '225/40R18 可用 8、安全庫存 8（剛好相等）',
+      expect: '規則是「小於」→ 不提醒；規則是「小於或等於」→ 提醒（預期會跟著規則變）',
+      run: function () {
+        var db = fresh();
+        var op = ERP.view.lowRule(db);
+        var inList = ERP.view.lowStock(db).some(function (x) { return x.sku === 'TR-008'; });
+        expect(inList === (op === 'le'), '目前規則是「' + Rules.LOW_OPS[op].short + '」，剛好相等時' + (inList ? '提醒了' : '沒提醒') + '，和規則不符');
+        return '目前規則「' + Rules.LOW_OPS[op].short + '」：可用 8 ＝ 安全庫存 8 → ' + (inList ? '提醒' : '不提醒');
+      }
+    },
+    {
+      id: 'TC-026-04', rule: 'RULE-026', req: 'REQ-026', branch: '邊界',
+      title: '規則從「小於」改成「小於或等於」→ 剛好相等的品項才開始被提醒',
+      given: '規則是「小於」；老闆把規則改成「小於或等於」並寫理由',
+      expect: '225/40R18（可用 8 ＝ 安全 8）改規則前不提醒、改後提醒；原本就會提醒的品項前後都在；稽核記下前後與理由',
+      run: function () {
+        var db = fresh();
+        db.settings = { low_stock_op: 'lt' };
+        var inList = function (d, sku) { return ERP.view.lowStock(d).some(function (x) { return x.sku === sku; }); };
+        expect(!inList(db, 'TR-008') && inList(db, 'TR-002') && inList(db, 'TR-005'), '改規則前的清單不對');
+        var r = ERP.setLowStockRule(db, 'U03', 'le', '剛好用完安全庫存也要提醒');
+        expect(r.ok, '改規則失敗：' + r.message);
+        expect(inList(r.state, 'TR-008') && inList(r.state, 'TR-002') && inList(r.state, 'TR-005'), '改規則後的清單不對');
+        var a = lastAudit(r.state);
+        expect(a.action === 'LOWRULE_CHANGED' && a.detail.before === 'lt' && a.detail.after === 'le' && a.detail.reason.indexOf('用完安全庫存') >= 0, '稽核沒有記下前後與理由');
+        invariantsOk(r.state);
+        return '改規則前 2 項提醒、改後 3 項（多了 225/40R18）；稽核：' + a.message;
+      }
+    },
+    {
+      id: 'TC-027-01', rule: 'RULE-027', req: 'REQ-026', branch: 'True',
+      title: '老闆設定安全庫存 → 更新並留下紀錄',
+      given: '老闆把 205/55R16 的安全庫存從 20 改成 130（可用 124）',
+      expect: '安全庫存變 130、205/55R16 開始被提醒；在庫與預留不變；稽核記下 20 → 130',
+      run: function () {
+        var db = fresh();
+        var before = stock(db);
+        var r = ERP.setSafetyStock(db, 'U03', 'TR-001', 130);
+        expect(r.ok, '設定失敗：' + r.message);
+        expect(product(r.state, 'TR-001').safety === 130, '安全庫存沒有更新');
+        expect(ERP.view.lowStock(r.state).some(function (x) { return x.sku === 'TR-001'; }), '設到比可用還高，應該開始提醒');
+        expect(stock(r.state) === before, '設定安全庫存不應該動到在庫、預留');
+        var a = lastAudit(r.state);
+        expect(a.action === 'SAFETY_SET' && a.detail.before === 20 && a.detail.after === 130, '稽核沒有記下前後');
+        invariantsOk(r.state);
+        return r.message;
+      }
+    },
+    {
+      id: 'TC-027-02', rule: 'RULE-027', req: 'REQ-026', branch: 'False',
+      title: '業務設定、或填 -1、1.5、文字 → 被拒絕',
+      given: '業務阿明想設定；老闆填 -1、1.5、"abc"、空的',
+      expect: '全部被拒絕，安全庫存完全不變，每次都留下被拒絕的稽核',
+      run: function () {
+        var db = fresh();
+        var snap = JSON.stringify(db.products);
+        var a = ERP.setSafetyStock(db, 'U01', 'TR-001', 50);
+        expect(!a.ok && a.message.indexOf('只有老闆') === 0 && JSON.stringify(a.state.products) === snap, '業務竟然能設定：' + a.message);
+        var cur = a.state;
+        [-1, 1.5, 'abc', null, ''].forEach(function (bad) {
+          var r = ERP.setSafetyStock(cur, 'U03', 'TR-001', bad);
+          expect(!r.ok && r.message.indexOf('0 或正整數') >= 0, '不合理的數字竟然通過：' + JSON.stringify(bad));
+          expect(JSON.stringify(r.state.products) === snap, '被拒絕後資料還是變了');
+          cur = r.state;
+        });
+        var none = ERP.setSafetyStock(cur, 'U03', 'NOPE', 5);
+        expect(!none.ok, '不存在的品項竟然通過');
+        expect(lastAudit(none.state).action === 'SAFETY_DENIED', '沒有留下被拒絕的稽核');
+        return '業務與 5 種不合理的數字都被拒絕，安全庫存不變';
+      }
+    },
+    {
+      id: 'TC-027-03', rule: 'RULE-027', req: 'REQ-026', branch: '邊界',
+      title: '安全庫存設成 0 → 不再提醒',
+      given: '225/45R17（可用 1，原本會提醒）的安全庫存設成 0',
+      expect: '設定成功；225/45R17 從提醒清單消失；訊息說明 0 代表不設警示',
+      run: function () {
+        var db = fresh();
+        expect(ERP.view.lowStock(db).some(function (x) { return x.sku === 'TR-002'; }), '設定前 TR-002 應該在提醒清單');
+        var r = ERP.setSafetyStock(db, 'U04', 'TR-002', 0);
+        expect(r.ok && r.message.indexOf('不設警示') >= 0, '設成 0 失敗：' + r.message);
+        expect(!ERP.view.lowStock(r.state).some(function (x) { return x.sku === 'TR-002'; }), '設成 0 之後還在提醒');
+        return r.message;
+      }
+    },
+    {
+      id: 'TC-028-01', rule: 'RULE-028', req: 'REQ-026', branch: 'True',
+      title: '老闆修改低庫存規則並寫理由 → 設定改變並留下前後紀錄',
+      given: '規則是「小於」；老闆改成「小於或等於」，理由「剛好用完也要提醒」',
+      expect: '設定變成「小於或等於」；稽核記下前後與理由；庫存不變',
+      run: function () {
+        var db = fresh();
+        db.settings = { low_stock_op: 'lt' };
+        var before = stock(db);
+        var r = ERP.setLowStockRule(db, 'U03', 'le', '剛好用完也要提醒');
+        expect(r.ok && r.state.settings.low_stock_op === 'le', '設定沒有改成「小於或等於」：' + r.message);
+        var a = lastAudit(r.state);
+        expect(a.action === 'LOWRULE_CHANGED' && a.detail.before === 'lt' && a.detail.after === 'le' && a.detail.reason === '剛好用完也要提醒', '稽核內容不對');
+        expect(stock(r.state) === before, '改規則不應該動到庫存');
+        var back = ERP.setLowStockRule(r.state, 'U03', 'lt', '回復：先維持原本的規則');
+        expect(back.ok && back.state.settings.low_stock_op === 'lt', '改回去失敗：' + back.message);
+        return r.message;
+      }
+    },
+    {
+      id: 'TC-028-02', rule: 'RULE-028', req: 'REQ-026', branch: 'False',
+      title: '業務修改、沒寫理由、和目前相同、亂填 → 被拒絕',
+      given: '業務阿明想改；老闆沒寫理由；老闆選和目前一樣的；老闆填不存在的比較方式',
+      expect: '全部被拒絕，規則設定完全不變，每次都留下被拒絕的稽核',
+      run: function () {
+        var db = fresh();
+        db.settings = { low_stock_op: 'lt' };
+        var tries = [
+          ['U01', 'le', '想改', '只有老闆'],
+          ['U03', 'le', '   ', '為什麼要改'],
+          ['U03', 'lt', '沒變', '沒有需要修改'],
+          ['U03', 'xx', '亂填', '只能選']
+        ];
+        var cur = db;
+        tries.forEach(function (t) {
+          var r = ERP.setLowStockRule(cur, t[0], t[1], t[2]);
+          expect(!r.ok && r.message.indexOf(t[3]) >= 0, '應該被拒絕（' + t[3] + '）但是：' + r.message);
+          expect(r.state.settings.low_stock_op === 'lt', '被拒絕後設定還是變了');
+          expect(lastAudit(r.state).action === 'LOWRULE_DENIED', '沒有留下被拒絕的稽核');
+          cur = r.state;
+        });
+        return '4 種不該改的情況都被拒絕，設定維持「小於」';
+      }
     }
   ];
 
@@ -514,7 +684,10 @@ var Tests = (function () {
     }
   }
 
-  function runAll() { return cases.map(run); }
+  function runAll(cfg) {
+    config = cfg || {};
+    try { return cases.map(run); } finally { config = {}; }
+  }
 
   return { cases: cases, byId: byId, run: run, runAll: runAll };
 })();

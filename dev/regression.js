@@ -174,7 +174,9 @@ check('約定', '每個 ERP 動作（成功、失敗）都回傳 {ok,message,sta
     ['shipOrder', SEED, ['U03', 'SO-0001']], ['shipOrder', SEED, ['U01', 'SO-0001']], ['shipOrder', SEED, ['U03', 'SO-0004']], ['shipOrder', SEED, ['U03', 'NOPE']],
     ['receiveStock', SEED, ['U03', 'TR-001', 5, 'x']], ['receiveStock', SEED, ['U03', 'TR-001', 0]], ['receiveStock', SEED, ['U01', 'TR-001', 5]], ['receiveStock', SEED, ['U03', 'NOPE', 5]],
     ['addProduct', SEED, ['U03', { brand: 'B', name: 'N', spec: '1/1R1', year: 2025, cost: 1, price: 2 }]], ['addProduct', SEED, ['U01', { brand: 'B', spec: 'S', year: 2025, cost: 1, price: 2 }]], ['addProduct', SEED, ['U03', {}]],
-    ['updateProduct', SEED, ['U03', 'TR-001', { price: 3400 }]], ['updateProduct', SEED, ['U01', 'TR-001', { price: 3400 }]], ['updateProduct', SEED, ['U03', 'NOPE', { price: 1 }]]
+    ['updateProduct', SEED, ['U03', 'TR-001', { price: 3400 }]], ['updateProduct', SEED, ['U01', 'TR-001', { price: 3400 }]], ['updateProduct', SEED, ['U03', 'NOPE', { price: 1 }]],
+    ['setSafetyStock', SEED, ['U03', 'TR-001', 30]], ['setSafetyStock', SEED, ['U01', 'TR-001', 30]], ['setSafetyStock', SEED, ['U03', 'NOPE', 30]], ['setSafetyStock', SEED, ['U03', 'TR-001', -1]],
+    ['setLowStockRule', SEED, ['U03', 'le', '測試']], ['setLowStockRule', SEED, ['U01', 'le', '測試']], ['setLowStockRule', SEED, ['U03', 'lt', '測試']], ['setLowStockRule', SEED, ['U03', 'le', '']]
   ];
   for (const [fn, db, args] of calls) {
     const before = JSON.stringify(db);
@@ -209,7 +211,8 @@ check('隨機', '3000 次隨機操作（含進貨、出貨、新增商品）：�
       () => ERP.submitOrder(db, u, oid), () => ERP.submitOrder(db, u, oid), () => ERP.approveOrder(db, u, oid), () => ERP.rejectOrder(db, u, oid, 'r'),
       () => ERP.returnOrder(db, u, oid, 'r'), () => ERP.queryStock(db, u, ''),
       () => ERP.shipOrder(db, u, oid), () => ERP.shipOrder(db, u, oid), () => ERP.receiveStock(db, u, known()[rnd(known().length)], q),
-      () => ERP.addProduct(db, u, newProducts[rnd(newProducts.length)]), () => ERP.updateProduct(db, u, known()[rnd(known().length)], { price: q })];
+      () => ERP.addProduct(db, u, newProducts[rnd(newProducts.length)]), () => ERP.updateProduct(db, u, known()[rnd(known().length)], { price: q }),
+      () => ERP.setSafetyStock(db, u, known()[rnd(known().length)], q), () => ERP.setLowStockRule(db, u, ['lt', 'le', 'xx'][rnd(3)], rnd(2) ? '理由' : '')];
     const k = rnd(ops.length); const r = ops[k]();
     tally[r.ok] = (tally[r.ok] || 0) + 1;
     assert(r.state.audit.length === db.audit.length + 1, '第 ' + i + ' 次沒有寫 audit');
@@ -246,7 +249,7 @@ check('升級', '舊資料載入：待審核單補上預留；庫存不夠的自
   s.wb.requirements = [{ id: 'REQ-004B', text: '舊文字', priority: 'Must', quality: [0, 0, 0, 0, 0, 0, 0], group: 'reserve-timing', status: 'pending', source: 's', evidence: 'e', note: '', edited: false, history: [] }];
   mem['aiwb_state_v01'] = JSON.stringify(s);
   const m = Store.load();
-  assert(m.meta.data_version === 5, 'data_version');
+  assert(m.meta.data_version === 6, 'data_version');
   assert(ERP.view.invariants(m).length === 0, ERP.view.invariants(m).join('；'));
   assert(m.orders.find(o => o.id === 'SO-0004').status === 'SUBMITTED' && prod(m, 'TR-003').reserved === 8, 'SO-0004 沒補上預留');
   const sa = m.orders.find(o => o.id === ida).status, sb = m.orders.find(o => o.id === idb).status;
@@ -379,7 +382,7 @@ check('寄庫', '寄庫決定：購買當下就扣庫存——需求文字、備
   s.wb.requirements.find(r => r.id === 'REQ-006').text = '我自己改的字'; s.wb.requirements.find(r => r.id === 'REQ-006').edited = true;
   s.wb.interview.questions.push({ text: '寄庫的輪胎，購買當下就從庫存扣掉，還是等客戶取貨才扣？（舊）', resolved: false });
   mem['aiwb_state_v01'] = JSON.stringify(s); const m = Store.load(); delete mem['aiwb_state_v01'];
-  assert(m.meta.data_version === 5 && m.wb.requirements.find(r => r.id === 'REQ-011').text === c.text && m.wb.requirements.find(r => r.id === 'REQ-011').note === c.decision, 'v3→v4');
+  assert(m.meta.data_version === 6 && m.wb.requirements.find(r => r.id === 'REQ-011').text === c.text && m.wb.requirements.find(r => r.id === 'REQ-011').note === c.decision, 'v3→v4');
   assert(!m.wb.interview.questions.some(q => /寄庫的輪胎/.test(q.text)), '舊疑問沒移除');
   assert(m.wb.requirements.find(r => r.id === 'REQ-006').text === '我自己改的字', '人改過的需求被覆蓋');
 });
@@ -390,7 +393,7 @@ check('升級', '第 4 版升到第 5 版：補進貨單清單與編號、補 RE
   s.wb.interview.questions.push({ text: '核准之後，還要不要有「出貨」這一步來真正扣掉在庫？（舊）', resolved: false });
   s.wb.rules = [{ ...clone(Rules.RULE_TEMPLATES.find(r => r.id === 'RULE-021')), t: { action: '', effect: '', message: '', audit: '', tests: [], final: '' }, f: { action: '', effect: '', message: '', audit: '', tests: [], final: '' }, edge: { text: '', tests: [] }, version: 'v0.1.0', orphan: false, created_at: 'x', edited_at: null }];
   mem['aiwb_state_v01'] = JSON.stringify(s); const m = Store.load(); delete mem['aiwb_state_v01'];
-  assert(m.meta.data_version === 5 && Array.isArray(m.receipts) && m.seq.receipt === 1 && m.seq.product === 9, '資料版本或進貨單欄位');
+  assert(m.meta.data_version === 6 && Array.isArray(m.receipts) && m.seq.receipt === 1 && m.seq.product === 9, '資料版本或進貨單欄位');
   assert(['REQ-024', 'REQ-025'].every(id => m.wb.requirements.some(r => r.id === id && r.status === 'ai')), '沒補 REQ-024／025');
   assert(!m.wb.interview.questions.some(q => /還要不要有「出貨」這一步/.test(q.text)), '舊疑問沒移除');
   assert(Rules.check(m.wb.rules[0]).complete, '沒被改過的 RULE-021 沒有換成完整版');
@@ -479,6 +482,110 @@ check('版本線', '人工檢查項勾選會記進快照；存進 localStorage �
   assert(db.wb.versions.map(v => v.id).join() === 'v0.1.0,v0.1.1');
   Store.save(db); const back = Store.load(); assert(back.wb.versions.length === 2 && back.meta.version === 'v0.1.1');
   const fresh = Store.reset(); assert(fresh.wb.versions.length === 0);
+});
+
+// ---------- Sprint 3：安全庫存警示＋規則變更＋變更影響分析 ----------
+const chgState = () => {
+  let db = clone(SEED);
+  for (let i = 0; i < 5; i++) db = Store.wb.interviewSend(db, Rules.interviewChips(db.wb.interview.step, db.wb)[0]).state;
+  for (const r of db.wb.requirements.filter(r => r.status === 'pending')) db = Store.wb.setReqStatus(db, r.id, 'confirm').state;
+  for (const id of ['REQ-008', 'REQ-010', 'REQ-026']) db = Store.wb.setReqStatus(db, id, 'adopt').state;
+  for (const r of db.wb.requirements.filter(r => r.status === 'ai')) db = Store.wb.setReqStatus(db, r.id, 'defer').state;
+  return Store.wb.genDevpack(Store.wb.buildRules(db).state).state;
+};
+const lowSkus = db => ERP.view.lowStock(db).map(x => x.sku).sort().join(',');
+check('Sprint 3', '種子資料：規則「小於」時提醒 TR-002、TR-005；TR-008 可用 ＝ 安全庫存，不提醒；業務查詢仍沒有成本與安全庫存欄位', () => {
+  assert(SEED.settings.low_stock_op === 'lt' && lowSkus(SEED) === 'TR-002,TR-005', lowSkus(SEED));
+  assert(avail(SEED, 'TR-008') === 8 && prod(SEED, 'TR-008').safety === 8);
+  const q = ERP.queryStock(SEED, 'U01', '').data; assert(q.every(r => !('cost' in r) && !('safety' in r)), '業務看到多餘欄位');
+});
+check('Sprint 3', '舊資料第 5 版升到第 6 版：補安全庫存、低庫存規則設定、變更紀錄，補 REQ-026（AI 建議）', () => {
+  const s = clone(W); s.meta.data_version = 5;
+  s.products.forEach(p => { delete p.safety; }); delete s.settings; delete s.wb.changes;
+  s.wb.requirements = s.wb.requirements.filter(r => r.id !== 'REQ-026');
+  mem['aiwb_state_v01'] = JSON.stringify(s); const m = Store.load(); delete mem['aiwb_state_v01'];
+  assert(m.meta.data_version === 6 && m.settings.low_stock_op === 'lt' && Array.isArray(m.wb.changes), '設定或變更紀錄沒補上');
+  assert(m.products.every(p => p.safety === SEED.products.find(x => x.sku === p.sku).safety), '安全庫存沒補上');
+  assert(m.wb.requirements.some(r => r.id === 'REQ-026' && r.status === 'ai'), '沒補 REQ-026');
+});
+check('Sprint 3', 'RULE-026／027／028 的 8 項閉環完整、驗收案例都已實作；確認 REQ-026 後進開發包，規格寫明低庫存規則', () => {
+  for (const id of ['RULE-026', 'RULE-027', 'RULE-028']) {
+    const r = Rules.RULE_TEMPLATES.find(x => x.id === id);
+    assert(Rules.check(r).complete && r.t.tests.length && r.f.tests.length && Rules.implemented(r), id);
+  }
+  const db = chgState(); const pack = Rules.devpack(db);
+  assert(['RULE-026', 'RULE-027', 'RULE-028'].every(id => pack.ready.includes(id)), '沒進開發包：' + pack.ready.join());
+  assert(/低庫存警示/.test(pack.files['SPEC.md']), 'SPEC 沒寫低庫存規則');
+});
+check('Sprint 3', '變更影響分析：REQ-026 → 3 條規則、9 個驗收案例、程式；REQ-006 → RULE-001，並列出同一條規則的其他需求', () => {
+  const db = chgState(); const im = Rules.impactOf(db, 'REQ-026');
+  assert(im.rules.map(r => r.id).join() === 'RULE-026,RULE-027,RULE-028', im.rules.map(r => r.id).join());
+  assert(im.tests.length === 9 && ['TC-026-01', 'TC-026-04', 'TC-027-03', 'TC-028-02'].every(x => im.tests.includes(x)), im.tests.join());
+  assert(im.code.includes('ERP.setLowStockRule') && im.code.includes('ERP.view.lowStock'), im.code.join());
+  const i6 = Rules.impactOf(db, 'REQ-006'); assert(i6.rules.some(r => r.id === 'RULE-001') && i6.otherReqs.includes('REQ-001'), JSON.stringify(i6));
+  assert(Rules.impactOf(db, 'REQ-999').req === null, '不存在的需求要回 null');
+});
+check('Sprint 3', '套用變更前先擋：沒寫理由、需求還沒確認、新舊相同，都不會改到任何資料', () => {
+  const db = chgState(); const snap = JSON.stringify(db);
+  const a = Store.wb.applyChange(db, { kind: 'low-op', req_id: 'REQ-026', to: 'le', reason: '  ' }); assert(!a.ok && /理由/.test(a.message) && JSON.stringify(a.state) === snap);
+  const same = Store.wb.applyChange(db, { kind: 'low-op', req_id: 'REQ-026', to: 'lt', reason: '沒變' }); assert(!same.ok && same.state.wb.changes.length === 0 && same.state.settings.low_stock_op === 'lt');
+  const un = clone(db); un.wb.requirements.find(r => r.id === 'REQ-026').status = 'ai';
+  const b = Store.wb.applyChange(un, { kind: 'low-op', req_id: 'REQ-026', to: 'le', reason: '想改' }); assert(!b.ok && /還沒有確認/.test(b.message) && b.state.settings.low_stock_op === 'lt');
+  const c = Store.wb.applyChange(db, { kind: 'xx', req_id: 'REQ-026', to: 'le', reason: '想改' }); assert(!c.ok);
+  const d = Store.wb.applyChange(db, { kind: 'req-text', req_id: 'REQ-026', to: '', reason: '想改' }); assert(!d.ok);
+});
+check('Sprint 3', '低庫存規則變更全流程：套用 → 用新規則重跑全部測試 → 全過才存成新版本並綁定；稽核與變更紀錄都留下', () => {
+  const db = chgState();
+  const a = Store.wb.applyChange(db, { kind: 'low-op', req_id: 'REQ-026', to: 'le', reason: '剛好用完安全庫存也要提醒' });
+  assert(a.ok && a.state.settings.low_stock_op === 'le' && a.state.wb.changes.length === 1, a.message);
+  const ch = a.state.wb.changes[0];
+  assert(ch.id === 'CHG-001' && ch.status === 'applied' && ch.from === 'lt' && ch.to === 'le' && ch.impact.rules.length === 3 && !ch.version, JSON.stringify(ch));
+  assert(a.state.audit[a.state.audit.length - 1].action === 'LOWRULE_CHANGED');
+  assert(lowSkus(a.state) === 'TR-002,TR-005,TR-008', lowSkus(a.state));
+  const res = Tests.runAll({ settings: a.state.settings });
+  assert(res.length === Tests.cases.length && res.every(x => x.pass), res.filter(x => !x.pass).map(x => x.id + ':' + x.actual).join());
+  assert(/小於或等於/.test(res.find(x => x.id === 'TC-026-03').actual), '邊界案例沒有照新規則判斷');
+  const f = Store.wb.finishChange(a.state, ch.id, res);
+  const c2 = f.state.wb.changes[0];
+  assert(f.ok && c2.status === 'verified' && c2.regression.pass === c2.regression.total && c2.version === 'v0.1.0' && f.state.meta.version === 'v0.1.0', f.message);
+  assert(f.state.wb.versions[0].note.includes('CHG-001') && f.state.wb.versions[0].note.includes('剛好用完'), f.state.wb.versions[0].note);
+  assert(f.state.wb.testRuns.length === 1 && f.state.wb.testRuns[0].total === Tests.cases.length);
+  // 有測試沒過：不存版本，狀態 failed，可以回復
+  const bad = res.map((x, i) => i === 0 ? Object.assign({}, x, { pass: false, actual: '故意失敗' }) : x);
+  const g = Store.wb.finishChange(a.state, ch.id, bad);
+  assert(!g.ok && g.state.wb.changes[0].status === 'failed' && g.state.wb.versions.length === 0 && g.state.wb.changes[0].regression.failed.length === 1, g.message);
+});
+check('Sprint 3', '舊規則下的回歸一樣全過（規則改回「小於」時，邊界案例的預期也跟著變回來）', () => {
+  const lt = Tests.runAll({ settings: { low_stock_op: 'lt' } }); const le = Tests.runAll({ settings: { low_stock_op: 'le' } });
+  assert(lt.every(x => x.pass) && le.every(x => x.pass), '有案例沒過');
+  assert(/不提醒/.test(lt.find(x => x.id === 'TC-026-03').actual) && /→ 提醒/.test(le.find(x => x.id === 'TC-026-03').actual));
+  assert(Tests.runAll().every(x => x.pass) && Tests.runAll({}).length === Tests.cases.length);
+});
+check('Sprint 3', '回復：要寫理由；只能回復同一個對象最新的變更；回復後設定回到原本，留下理由，再跑測試存成新版本', () => {
+  let db = chgState();
+  const a = Store.wb.applyChange(db, { kind: 'low-op', req_id: 'REQ-026', to: 'le', reason: '第一次改' });
+  db = Store.wb.finishChange(a.state, 'CHG-001', Tests.runAll({ settings: a.state.settings })).state;
+  const b = Store.wb.applyChange(db, { kind: 'low-op', req_id: 'REQ-026', to: 'lt', reason: '又改回來' });
+  db = Store.wb.finishChange(b.state, 'CHG-002', Tests.runAll({ settings: b.state.settings })).state;
+  assert(db.wb.changes.length === 2 && db.wb.versions.length === 2 && db.settings.low_stock_op === 'lt');
+  const old = Store.wb.revertChange(db, 'CHG-001', '想回到最初'); assert(!old.ok && /CHG-002/.test(old.message) && old.state.settings.low_stock_op === 'lt');
+  const noWhy = Store.wb.revertChange(db, 'CHG-002', ' '); assert(!noWhy.ok && /理由/.test(noWhy.message));
+  const r = Store.wb.revertChange(db, 'CHG-002', '剛剛不該改回來');
+  assert(r.ok && r.state.settings.low_stock_op === 'le' && r.state.wb.changes[1].status === 'reverted' && r.state.wb.changes[1].revert_reason === '剛剛不該改回來', r.message);
+  assert(/剛剛不該改回來/.test(r.state.audit[r.state.audit.length - 1].message), '稽核沒有留下回復理由');
+  const f = Store.wb.finishChange(r.state, 'CHG-002', Tests.runAll({ settings: r.state.settings }), 'revert');
+  assert(f.ok && f.state.wb.versions.length === 3 && /回復 CHG-002/.test(f.state.wb.versions[2].note) && f.state.wb.changes[1].revert_version === 'v0.1.2', f.message);
+  const again = Store.wb.revertChange(f.state, 'CHG-002', '再回復一次'); assert(!again.ok && /已經回復/.test(again.message));
+});
+check('Sprint 3', '需求文字變更：已確認的需求平常不能直接改；走變更流程可以改，原文與理由都保留，回復後文字回到原本', () => {
+  const db = chgState(); const orig = db.wb.requirements.find(r => r.id === 'REQ-006').text;
+  assert(!Store.wb.editReq(db, 'REQ-006', '亂改').ok, '已確認的需求不該能直接改');
+  const a = Store.wb.applyChange(db, { kind: 'req-text', req_id: 'REQ-006', to: '業務與倉管都不可看到成本與毛利', reason: '新增倉管角色' });
+  const q = a.state.wb.requirements.find(r => r.id === 'REQ-006');
+  assert(a.ok && q.text === '業務與倉管都不可看到成本與毛利' && q.edited && q.history[q.history.length - 1].note.includes('新增倉管角色'), a.message);
+  assert(a.state.wb.changes[0].from === orig && a.state.wb.changes[0].impact.rules.some(r => r.id === 'RULE-001'));
+  const r = Store.wb.revertChange(a.state, 'CHG-001', '倉管角色先不做');
+  assert(r.ok && r.state.wb.requirements.find(x => x.id === 'REQ-006').text === orig);
 });
 
 // ---------- 輸出 ----------

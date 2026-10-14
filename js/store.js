@@ -21,8 +21,8 @@ var Store = (function () {
   }
 
   // ---------- 舊資料升級 ----------
-  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）；3：加入參考 ERP 案例的候選需求；4：寄庫採購買當下就扣庫存；5：Sprint 1 進出貨與商品管理
-  var DATA_VERSION = 5;
+  // data_version 1：核准才預留；2：送出即預留（待審核與已核准的訂單都佔用庫存）；3：加入參考 ERP 案例的候選需求；4：寄庫採購買當下就扣庫存；5：Sprint 1 進出貨與商品管理；6：Sprint 3 安全庫存警示與規則變更
+  var DATA_VERSION = 6;
 
   function prodOf(s, sku) { return s.products.filter(function (p) { return p.sku === sku; })[0]; }
 
@@ -43,6 +43,7 @@ var Store = (function () {
     if (v < 3) migrateToV3(s);
     if (v < 4) migrateToV4(s);
     if (v < 5) migrateToV5(s);
+    if (v < 6) migrateToV6(s);
     s.meta.data_version = DATA_VERSION;
     return s;
   }
@@ -83,6 +84,26 @@ var Store = (function () {
         status: 'ai', source: 'AI 流程走查（升級補充）', evidence: 'AI 依 ERP 難點檢核清單推論（沒有使用者原話）', note: '', edited: false,
         history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充（Sprint 1）' }]
       });
+    });
+  }
+
+  // v6：Sprint 3 安全庫存警示與規則變更。補安全庫存欄位、低庫存規則設定、變更紀錄；問答已完成的專案補上 REQ-026（AI 建議）
+  function migrateToV6(s) {
+    s.products.forEach(function (p) {
+      if (p.safety != null) return;
+      var seed = SEED.products.filter(function (x) { return x.sku === p.sku; })[0];
+      p.safety = seed ? seed.safety : 0;
+    });
+    s.settings = s.settings || { low_stock_op: 'lt' };
+    s.wb.changes = s.wb.changes || [];
+    refreshUnedited(s);
+    if (s.wb.interview.step < Rules.DONE_STEP) return;
+    if (s.wb.requirements.some(function (r) { return r.id === 'REQ-026'; })) return;
+    var c = Rules.REQ_CATALOG['REQ-026'];
+    s.wb.requirements.push({
+      id: 'REQ-026', text: c.text, priority: c.priority, quality: c.quality.slice(), group: '',
+      status: 'ai', source: 'AI 流程走查（升級補充）', evidence: 'AI 依 ERP 難點檢核清單推論（沒有使用者原話）', note: '', edited: false,
+      history: [{ at: now(), by: 'AI', to: 'ai', note: '資料升級時補充（Sprint 3）' }]
     });
   }
 
@@ -444,6 +465,101 @@ var Store = (function () {
     s.meta.version = label;
     wbLog(s, 'VERSION', label);
     return result(true, '已建立版本 ' + label, s);
+  };
+
+  // ---------- 變更需求：先看影響範圍 → 確認 → 套用 → 重跑全部測試 → 綁定新版本（可回復）----------
+  function findChange(s, id) { return s.wb.changes.filter(function (c) { return c.id === id; })[0]; }
+  function bossOf(s) { return s.users.filter(Rules.isBoss)[0]; }
+  function opLabel(op) { return Rules.LOW_OPS[op] ? Rules.LOW_OPS[op].short : String(op); }
+
+  wb.applyChange = function (db, spec) {
+    spec = spec || {};
+    var reason = String(spec.reason || '').trim();
+    if (!reason) return result(false, '請先寫下為什麼要改（理由會留在變更紀錄裡）', db);
+    var s = clone(db);
+    var req = findReq(s, spec.req_id);
+    if (!req) return result(false, '找不到需求 ' + spec.req_id + '，請先完成「AI 問答」', db);
+    if (req.status !== 'confirmed') return result(false, req.id + ' 還沒有確認。請先到「確認需求」決定，再來變更', db);
+    var ch = {
+      id: 'CHG-' + pad(s.wb.changes.length + 1, 3), at: now(), kind: spec.kind, req_id: req.id, reason: reason, by: '需求負責人',
+      status: 'applied', impact: Rules.impactOf(s, req.id), from: '', to: '', title: '', regression: null, version: '', reverted_at: null
+    };
+    if (spec.kind === 'low-op') {
+      var op = spec.to;
+      var boss = bossOf(s);
+      var r = ERP.setLowStockRule(s, boss.id, op, reason);
+      if (!r.ok) return result(false, r.message, r.state);
+      s = r.state;
+      ch.from = r.data.before; ch.to = r.data.after;
+      ch.title = '低庫存警示的比較方式：' + opLabel(ch.from) + ' → ' + opLabel(ch.to);
+    } else if (spec.kind === 'req-text') {
+      var text = String(spec.to || '').trim();
+      if (!text) return result(false, '新的說法不可空白', db);
+      if (text === req.text) return result(false, '新的說法和原本一樣，不需要變更', db);
+      ch.from = req.text; ch.to = text;
+      ch.title = '修改需求文字（' + req.id + '）';
+      req.history.push({ at: now(), by: 'HUMAN', to: req.status, note: '變更 ' + ch.id + '：' + req.text + ' → ' + text + '（理由：' + reason + '）' });
+      req.text = text;
+      req.edited = true;
+    } else {
+      return result(false, '不認得的變更類型', db);
+    }
+    s.wb.changes.push(ch);
+    wbLog(s, 'CHANGE', ch.id + ' ' + ch.title);
+    return result(true, ch.id + ' 已套用，接下來自動重跑全部驗收測試', s, { id: ch.id });
+  };
+
+  // 變更（或回復）之後：記錄測試結果；全部通過才綁定新版本，沒全過就停下來等人決定（可以回復）
+  wb.finishChange = function (db, id, results, mode) {
+    var s = clone(db);
+    var ch = findChange(s, id);
+    if (!ch) return result(false, '找不到變更 ' + id, db);
+    var reverting = mode === 'revert';
+    var failed = results.filter(function (r) { return !r.pass; }).map(function (r) { return r.id; });
+    var reg = { at: now(), pass: results.length - failed.length, total: results.length, failed: failed };
+    s = wb.recordTestRun(s, results).state;
+    ch = findChange(s, id);
+    if (reverting) ch.revert_regression = reg; else ch.regression = reg;
+    if (!failed.length) {
+      var label = reverting ? '回復 ' + ch.id + '：' + ch.title : '變更 ' + ch.id + '：' + ch.title + '（理由：' + ch.reason + '）';
+      s = wb.saveVersion(s, label).state;
+      ch = findChange(s, id);
+      if (reverting) ch.revert_version = s.meta.version; else { ch.version = s.meta.version; ch.status = 'verified'; }
+    } else if (!reverting) {
+      ch.status = 'failed';
+    }
+    wbLog(s, reverting ? 'CHANGE_REVERT_TEST' : 'CHANGE_TEST', ch.id + ' ' + reg.pass + '/' + reg.total);
+    var msg = failed.length
+      ? ch.id + '：有 ' + failed.length + ' 項驗收沒通過，沒有存成新版本。可以回復這次變更'
+      : ch.id + (reverting ? ' 已回復，' : ' 已套用，') + '全部 ' + reg.total + ' 項驗收通過，已存成 ' + s.meta.version;
+    return result(!failed.length, msg, s);
+  };
+
+  // 回復：只能回復「同一個對象最新的一次有效變更」，否則會蓋掉比較新的修改
+  wb.revertChange = function (db, id, reason) {
+    var why = String(reason || '').trim();
+    if (!why) return result(false, '請寫下為什麼要回復（理由會留在變更紀錄裡）', db);
+    var s = clone(db);
+    var ch = findChange(s, id);
+    if (!ch) return result(false, '找不到變更 ' + id, db);
+    if (ch.status === 'reverted') return result(false, ch.id + ' 已經回復過了', db);
+    var newer = s.wb.changes.filter(function (c) { return c.kind === ch.kind && c.req_id === ch.req_id && c.status !== 'reverted' && c.id > ch.id; });
+    if (newer.length) return result(false, '要先回復比較新的變更 ' + newer[newer.length - 1].id, db);
+    if (ch.kind === 'low-op') {
+      var r = ERP.setLowStockRule(s, bossOf(s).id, ch.from, '回復 ' + ch.id + '：' + why);
+      if (!r.ok) return result(false, r.message, r.state);
+      s = r.state;
+    } else if (ch.kind === 'req-text') {
+      var req = findReq(s, ch.req_id);
+      req.history.push({ at: now(), by: 'HUMAN', to: req.status, note: '回復 ' + ch.id + '：' + req.text + ' → ' + ch.from + '（理由：' + why + '）' });
+      req.text = ch.from;
+    }
+    ch = findChange(s, id);
+    ch.status = 'reverted';
+    ch.reverted_at = now();
+    ch.revert_reason = why;
+    wbLog(s, 'CHANGE_REVERT', ch.id);
+    return result(true, ch.id + ' 已回復，接下來自動重跑全部驗收測試', s, { id: ch.id });
   };
 
   return {

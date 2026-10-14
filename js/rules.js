@@ -29,7 +29,8 @@ var Rules = (function () {
     REJECTED: '老闆拒絕', REJECT_DENIED: '拒絕被拒',
     RETURNED: '老闆退回', RETURN_DENIED: '退回被拒', MIGRATED: '資料升級',
     SHIPPED: '出貨完成', SHIP_DENIED: '出貨被拒', RECEIVED: '進貨入庫', RECEIVE_DENIED: '進貨被拒',
-    PRODUCT_ADDED: '新增商品', PRODUCT_UPDATED: '修改價格', PRODUCT_DENIED: '商品異動被拒'
+    PRODUCT_ADDED: '新增商品', PRODUCT_UPDATED: '修改價格', PRODUCT_DENIED: '商品異動被拒',
+    SAFETY_SET: '設定安全庫存', SAFETY_DENIED: '安全庫存設定被拒', LOWRULE_CHANGED: '修改低庫存規則', LOWRULE_DENIED: '低庫存規則異動被拒'
   };
 
   // 需求狀態可由「人」改成哪些狀態；值是依序執行的單步操作（已確認／延後／拒絕要先撤回再改）
@@ -83,6 +84,23 @@ var Rules = (function () {
   // RULE-010 出貨完成：只處理已核准的訂單
   function canShip(order) { return !!order && order.status === 'APPROVED'; }
   function canEdit(order) { return !!order && (order.status === 'DRAFT' || order.status === 'RETURNED'); }
+
+  // RULE-027 安全庫存：0 或正整數（0 代表不設警示）
+  function isNonNegInt(v) {
+    var n = parseQty(v);
+    return Number.isSafeInteger(n) && n >= 0;
+  }
+  // RULE-026 低庫存警示：有設安全庫存（> 0），而且可用庫存「小於」（lt）或「小於或等於」（le）安全庫存
+  var LOW_OPS = {
+    lt: { sign: '<', label: '小於安全庫存才警示', short: '小於' },
+    le: { sign: '≤', label: '小於或等於安全庫存就警示', short: '小於或等於' }
+  };
+  function isLowStock(p, op) {
+    var safety = Number(p && p.safety) || 0;
+    if (safety <= 0) return false;
+    var a = available(p);
+    return op === 'le' ? a <= safety : a < safety;
+  }
 
   // =====================================================================
   // 2. IF 閉環 8 項檢查
@@ -159,7 +177,9 @@ var Rules = (function () {
     'REQ-023': { text: 'Excel 批次更新與備份還原：更新前先比對差異', priority: "Won't", quality: [2, 2, 1, 1, 2, 1, 2] },
     // Sprint 1 商品＋進出貨（簡報第 11 頁）：AI 流程走查提出，由人決定
     'REQ-024': { text: '老闆可對已核准的訂單按「出貨完成」：在庫與預留一起扣掉，訂單變「已出貨」', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2] },
-    'REQ-025': { text: '老闆可新增商品、修改售價與成本；業務看不到成本', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 1] }
+    'REQ-025': { text: '老闆可新增商品、修改售價與成本；業務看不到成本', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 1] },
+    // Sprint 3 安全庫存警示與規則變更（簡報第 10、17 頁）
+    'REQ-026': { text: '商品可設「安全庫存」；可用庫存低於安全庫存時標示「低庫存」並列入提醒；老闆可設定安全庫存，也可變更「低於」的比較方式（小於或小於等於）', priority: 'Should', quality: [2, 2, 2, 2, 1, 2, 2] }
   };
   var REQ_ORDER = Object.keys(REQ_CATALOG);
 
@@ -363,6 +383,43 @@ var Rules = (function () {
       ]
     }),
     tpl({
+      id: 'RULE-026', title: '低庫存警示：可用庫存低於安全庫存就提醒', primary: 'REQ-026', reqs: ['REQ-026'], difficulty: '報表口徑',
+      if: '商品有設安全庫存（大於 0），而且「可用庫存」（在庫 − 預留）低於安全庫存；「低於」目前是「小於」，剛好等於不算（要改成「小於或等於」，要走「變更需求」）',
+      t: { action: '標示「低庫存」，並列入老闆的提醒清單', effect: '只是顯示提醒，庫存、預留、訂單都不會改', message: '低庫存：可用 N，安全庫存 M', audit: '不用另外記錄（只是顯示，沒有改資料）', tests: ['TC-026-01'], final: '不影響任何訂單的狀態' },
+      f: { action: '不標示、不提醒', effect: '什麼都不改', message: '（沒有提醒）', audit: '不用另外記錄（只是顯示，沒有改資料）', tests: ['TC-026-02'], final: '不影響任何訂單的狀態' },
+      edge: { text: '可用「剛好等於」安全庫存：目前規則不提醒，改成「小於或等於」後就會提醒。規則一改，這個案例的預期也跟著變，所以一定要走變更流程並重跑測試', tests: ['TC-026-03', 'TC-026-04'] },
+      code: ['ERP.view.lowStock', 'Rules.isLowStock'],
+      tasks: [
+        '實作 Rules.isLowStock(product, op)：安全庫存大於 0，且可用庫存小於（lt）或小於或等於（le）安全庫存',
+        '實作 ERP.view.lowStock(db)：依 db.settings.low_stock_op 列出低庫存商品（唯讀，不寫稽核）',
+        '畫面：庫存表標示「低庫存」，老闆看得到提醒清單與目前使用的規則'
+      ]
+    }),
+    tpl({
+      id: 'RULE-027', title: '老闆設定每個商品的安全庫存', primary: 'REQ-026', reqs: ['REQ-026'], difficulty: '權限與敏感資料',
+      if: '操作的人是老闆，商品存在，安全庫存是 0 或正整數（0 代表不設警示）',
+      t: { action: '更新這個商品的安全庫存', effect: '只改這個商品的安全庫存；在庫、預留、價格都不變', message: '已設定 205/55R16 的安全庫存：20 → 30', audit: '記下誰把哪個商品的安全庫存從幾改成幾', tests: ['TC-027-01'], final: '安全庫存已更新' },
+      f: { action: '拒絕設定', effect: '安全庫存完全不變', message: '只有老闆可以設定安全庫存／安全庫存要填 0 或正整數', audit: '記下被拒絕的設定與原因', tests: ['TC-027-02'], final: '安全庫存維持原值' },
+      edge: { text: '設成 0 代表不設警示：這個商品不會再出現在提醒清單', tests: ['TC-027-03'] },
+      code: ['ERP.setSafetyStock', 'Rules.isNonNegInt'],
+      tasks: [
+        '實作 ERP.setSafetyStock(db, userId, sku, qty)：只有老闆；數量用 Rules.isNonNegInt 檢查',
+        '成功：寫 product.safety、稽核 SAFETY_SET（記前後數字）；失敗：資料完全不變、稽核 SAFETY_DENIED'
+      ]
+    }),
+    tpl({
+      id: 'RULE-028', title: '修改低庫存的比較方式（要寫理由，留前後紀錄）', primary: 'REQ-026', reqs: ['REQ-026'], difficulty: '單據狀態與回滾',
+      if: '操作的人是老闆，選的比較方式和目前不同，而且有寫理由',
+      t: { action: '改成新的比較方式（小於 或 小於等於）', effect: '只改「低庫存的比較方式」這一個設定；提醒清單依新規則重算；庫存、預留都不變', message: '低庫存規則已改：小於 → 小於或等於', audit: '記下誰把規則從什麼改成什麼，以及理由', tests: ['TC-028-01'], final: '新規則生效，原規則留在紀錄裡，可以回復' },
+      f: { action: '拒絕修改', effect: '設定完全不變', message: '只有老闆可以改／要寫理由／和目前的一樣', audit: '記下被拒絕的修改與原因', tests: ['TC-028-02'], final: '維持原本的規則' },
+      edge: { text: '改過之後可以改回去（回復），回復同樣要寫理由並留下紀錄', tests: [] },
+      code: ['ERP.setLowStockRule'],
+      tasks: [
+        '實作 ERP.setLowStockRule(db, userId, op, reason)：只有老闆；op 只能是 lt 或 le；理由不可空白；和目前相同要拒絕',
+        '成功：寫 db.settings.low_stock_op、稽核 LOWRULE_CHANGED（記前後與理由）；失敗：設定完全不變、稽核 LOWRULE_DENIED'
+      ]
+    }),
+    tpl({
       id: 'RULE-022', title: '庫存校正（以實際盤點為準）', primary: 'REQ-020', reqs: ['REQ-020'], difficulty: '盤點與校正',
       if: '管理員輸入的實際盤點數是 0 或更大的整數', note: 'AI 草稿（參考旺盛輪業 ERP）：只寫了條件，其餘要由人補齊'
     }),
@@ -543,10 +600,11 @@ var Rules = (function () {
         add('REQ-015', 'ai', '', 'AI 參考模型', inferred);
         add('REQ-024', 'ai', '核准之後要有「出貨完成」這一步，在庫才會真正減少', 'AI 流程走查', inferred);
         add('REQ-025', 'ai', '', 'AI 流程走查', inferred);
+        add('REQ-026', 'ai', '', 'AI 流程走查', inferred);
         REF_CANDIDATES.forEach(function (id) { add(id, 'ai', '', REF_SOURCE, REF_EVIDENCE[id]); });
         var early = wb.requirements.some(function (r) { return r.id === 'REQ-004B' && r.status === 'pending'; });
         qs.push('老闆退回或拒絕時，預留要不要釋放？' + (early ? '（送出就預留 → AI 建議：要釋放，否則庫存會被卡住）' : '（核准才預留 → 退回時還沒預留，AI 建議：不用釋放）'));
-        qs.push('低庫存是「小於」還是「小於或等於」安全庫存？');
+        qs.push('低庫存是「小於」還是「小於或等於」安全庫存？（系統先用「小於」；之後想改，到「變更需求」走變更流程，系統會先列出影響範圍）');
         qs.push(early ? '兩位業務同時送出同一批最後庫存怎麼辦？（AI 建議：送出時重新查庫存，只讓 1 人成功）' : '兩位老闆同時核准同一批最後庫存怎麼辦？（AI 建議：核准時重新查庫存，只讓 1 張成功）');
         qs.push('庫存要不要分「生產週碼批次」記錄？（參考 ERP：每筆庫存都分批次，才算得出庫齡，取消出貨時也才能還原到原批次）');
         var total = wb.requirements.length + adds.length;
@@ -623,6 +681,7 @@ var Rules = (function () {
     S.push('- 訂單狀態：DRAFT → SUBMITTED → APPROVED／REJECTED；SUBMITTED → RETURNED → SUBMITTED' + (confirmed.some(function (r) { return r.id === 'REQ-024'; }) ? '；APPROVED → SHIPPED' : ''));
     if (confirmed.some(function (r) { return r.id === 'REQ-024'; })) S.push('- 出貨（RULE-010）：老闆按「出貨完成」時，在庫與預留各扣訂購數，可用庫存不變；不可重複出貨');
     if (confirmed.some(function (r) { return r.id === 'REQ-019'; })) S.push('- 進貨（RULE-021）：老闆進貨使在庫增加並留下進貨單號（RC-0001 起依序）');
+    if (confirmed.some(function (r) { return r.id === 'REQ-026'; })) S.push('- 低庫存警示（RULE-026／027／028）：商品有安全庫存（> 0）且可用庫存「小於」（預設）或「小於或等於」安全庫存時標示低庫存；比較方式存在 settings.low_stock_op，只有老闆能改，要寫理由並留稽核');
     S.push('- 角色：sales（業務）、boss（老闆）', '');
     S.push('## 5. IF 閉環規則（可進入開發）', '');
     parts.ready.forEach(function (r) {
@@ -700,6 +759,31 @@ var Rules = (function () {
     };
   }
 
+  // =====================================================================
+  // 6. 變更影響分析：需求 → 規則 → 驗收案例／程式 → 已存版本（簡報第 17 頁）
+  // =====================================================================
+  function impactOf(db, reqId) {
+    var wb = db.wb;
+    var req = wb.requirements.filter(function (r) { return r.id === reqId; })[0] || null;
+    var pool = wb.rules.length ? wb.rules : RULE_TEMPLATES;
+    var rules = pool.filter(function (r) { return r.primary === reqId || r.reqs.indexOf(reqId) >= 0; });
+    var tests = [], code = [], others = [];
+    rules.forEach(function (r) {
+      testIds(r).forEach(function (t) { if (tests.indexOf(t) < 0) tests.push(t); });
+      (r.code || []).forEach(function (c) { if (code.indexOf(c) < 0) code.push(c); });
+      r.reqs.forEach(function (q) { if (q !== reqId && others.indexOf(q) < 0) others.push(q); });
+    });
+    var versions = wb.versions.filter(function (v) {
+      return v.reqs.some(function (x) { return x.id === reqId && x.status === 'confirmed'; });
+    }).map(function (v) { return v.id; });
+    return {
+      req: req ? { id: req.id, text: req.text, status: req.status } : null,
+      rules: rules.map(function (r) { return { id: r.id, title: r.title }; }),
+      tests: tests, code: code, otherReqs: others, versions: versions,
+      fromTemplates: !wb.rules.length
+    };
+  }
+
   function lastRun(db) { var r = db.wb.testRuns; return r.length ? r[r.length - 1] : null; }
   function passedIn(run, id) { return !!run && run.results.some(function (x) { return x.id === id && x.pass; }); }
 
@@ -730,7 +814,7 @@ var Rules = (function () {
   return {
     ROLE: ROLE, ORDER_STATUS: ORDER_STATUS, REQ_STATUS: REQ_STATUS, REQ_MOVES: REQ_MOVES,
     PRIORITY_LABEL: PRIORITY_LABEL, ACTION_LABEL: ACTION_LABEL,
-    available: available, parseQty: parseQty, isPositiveInt: isPositiveInt,
+    available: available, parseQty: parseQty, isPositiveInt: isPositiveInt, isNonNegInt: isNonNegInt, LOW_OPS: LOW_OPS, isLowStock: isLowStock,
     isSales: isSales, isBoss: isBoss, SALES_FIELDS: SALES_FIELDS, viewFor: viewFor,
     RESERVING: RESERVING, canReturn: canReturn, canApprove: canApprove, canReject: canReject, canShip: canShip, canEdit: canEdit,
     CLOSURE: CLOSURE, check: check, testIds: testIds, parseTestIds: parseTestIds,
@@ -740,6 +824,6 @@ var Rules = (function () {
     DONE_STEP: DONE_STEP, DEFAULT_NEED: DEFAULT_NEED,
     interviewChips: interviewChips, interviewRespond: interviewRespond, buildBlockers: buildBlockers, buildBlockerItems: buildBlockerItems,
     nextVersion: nextVersion, implemented: implemented, partition: partition, devpack: devpack,
-    lastRun: lastRun, checklist: checklist
+    lastRun: lastRun, checklist: checklist, impactOf: impactOf
   };
 })();

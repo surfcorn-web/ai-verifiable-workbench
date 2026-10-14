@@ -17,7 +17,8 @@ var App = (function () {
     focus: '',
     demoOpen: false,
     demoStep: 0,
-    timer: { left: 480, running: false, handle: null }
+    timer: { left: 480, running: false, handle: null },
+    chg: { kind: 'low-op', to: '', req: '', text: '', reason: '' }
   };
 
   var ROUTES = [
@@ -28,7 +29,8 @@ var App = (function () {
     { id: 'devpack', no: '5', nav: '開發包', title: '開發包', desc: '交給 AI 工程師寫程式' },
     { id: 'erp', no: '6', nav: '試用 ERP', title: '試用 ERP', desc: '實際操作看看' },
     { id: 'verify', no: '7', nav: '驗收測試', title: '驗收測試', desc: '自動檢查對不對' },
-    { id: 'versions', no: '8', nav: '存成版本', title: '存成版本', desc: '留下紀錄' }
+    { id: 'versions', no: '8', nav: '存成版本', title: '存成版本', desc: '留下紀錄' },
+    { id: 'change', no: '＋', nav: '變更需求', title: '變更需求', desc: '改規則前先看影響（選用）', opt: true }
   ];
 
   var DEMO = [
@@ -38,8 +40,9 @@ var App = (function () {
     { t: '3:00', to: 'rules', title: '檢查規則', say: '「送出叫貨單時先預留庫存」8 項都完成；「取消已核准訂單」缺 2 項，被擋下。' },
     { t: '4:00', to: 'devpack', title: '開發包', say: '產生開發包，按「複製全部」就能貼給 AI 工程師。' },
     { t: '4:45', to: 'erp', title: '試用 ERP', say: '阿明送 205/55R16 × 2，可用 124 → 122；小芳想送 225/45R17 × 2，可用只有 1，被拒絕；老闆核准，庫存不變；再按「出貨完成」，在庫才真的減少。' },
-    { t: '6:30', to: 'verify', title: '驗收測試', say: '按一下，22 項自動檢查全部通過；看「從需求追到驗收」。' },
-    { t: '7:15', to: 'versions', title: '存成版本', say: '勾完人工檢查項目，存成 v0.1.0。' }
+    { t: '6:30', to: 'verify', title: '驗收測試', say: '按一下，' + Tests.cases.length + ' 項自動檢查全部通過；看「從需求追到驗收」。' },
+    { t: '7:15', to: 'versions', title: '存成版本', say: '勾完人工檢查項目，存成 v0.1.0。' },
+    { t: '7:40', to: 'change', title: '變更需求', say: '把低庫存提醒從「小於」改成「小於或等於」：先看影響範圍、寫理由，套用後自動重跑全部測試並存成新版本；也可以回復。' }
   ];
 
   var FLOW = ['查詢庫存', '加入叫貨', '送出並預留', '更新可用庫存', '老闆審核', '出貨完成'];
@@ -183,6 +186,7 @@ var App = (function () {
       case 'erp': return erpTried();
       case 'verify': return !!run && run.pass === run.total;
       case 'versions': return w.versions.length > 0;
+      case 'change': return w.changes.some(function (c) { return c.status === 'verified' || c.status === 'reverted'; });
     }
     return false;
   }
@@ -203,7 +207,7 @@ var App = (function () {
     if (!run) return { to: 'verify', text: '按「執行全部驗收測試」，讓系統自動檢查 ERP 有沒有照規則運作。', go: '去驗收' };
     if (run.pass < run.total) return { to: 'verify', text: '有 ' + (run.total - run.pass) + ' 項驗收沒通過，請查看原因。', go: '看結果' };
     if (!w.versions.length) return { to: 'versions', text: '一切順利，存成第一個版本，留下紀錄。', go: '去存版本' };
-    return { to: null, text: '需求有變動時，回到「確認需求」修改，再往下重跑一次就好。' };
+    return { to: null, text: '需求或規則有變動時，到「變更需求」：系統會先列出影響範圍，改完自動重跑全部測試並存成新版本。' };
   }
 
   function nextBar() {
@@ -217,7 +221,7 @@ var App = (function () {
   function stepper() {
     return '<ol class="stepper">' + ROUTES.map(function (r) {
       var d = navDone(r.id);
-      return '<li class="' + (d ? 'done' : '') + '" data-act="go" data-to="' + r.id + '"><span class="no">' + (d ? '✔' : r.no) + '</span><b>' + esc(r.nav) + '</b><span>' + esc(r.desc) + '</span></li>';
+      return '<li class="' + (d ? 'done' : '') + (r.opt ? ' opt' : '') + '" data-act="go" data-to="' + r.id + '"><span class="no">' + (d ? '✔' : r.no) + '</span><b>' + esc(r.nav) + '</b><span>' + esc(r.desc) + '</span></li>';
     }).join('') + '</ol>';
   }
 
@@ -254,7 +258,7 @@ var App = (function () {
         '<td><button type="button" class="link" data-act="del-source" data-id="' + esc(s.id) + '">移除</button></td></tr>';
     }).join('');
     return head('1　建立專案', '先告訴系統你想做什麼，<b>一句話就夠</b>。寫好後按「開始 AI 問答」，AI 會一步步問你細節。') +
-      '<section class="card"><h2>整個流程只有 8 步，照左邊的順序做就好</h2>' + stepper() + '</section>' +
+      '<section class="card"><h2>整個流程 8 步，照左邊的順序做就好；之後想改規則，用最下面的「變更需求」</h2>' + stepper() + '</section>' +
       '<div class="grid-2">' +
         '<section class="card"><h2>你的專案</h2>' +
           '<form data-form="project">' +
@@ -588,11 +592,15 @@ var App = (function () {
     var rows = q.data || [];
     var hot = flowHot();
     var inv = ERP.view.invariants(db);
+    var lowList = ERP.view.lowStock(db), lowSet = {}, safetyOf = {};
+    lowList.forEach(function (x) { lowSet[x.sku] = true; });
+    db.products.forEach(function (p) { safetyOf[p.sku] = p.safety || 0; });
+    var lowShort = Rules.LOW_OPS[ERP.view.lowRule(db)].short;
 
     var roles = '<div class="roles"><span class="muted small">你現在扮演：</span>' + db.users.map(function (x) {
       return '<button type="button" class="role ' + (x.id === u.id ? 'on' : '') + '" data-act="erp-user" data-id="' + esc(x.id) + '">' + esc(x.name) + '（' + Rules.ROLE[x.role] + '）</button>';
     }).join('') + '</div>' +
-      '<p class="role-note">' + (boss ? '老闆：看得到成本與毛利，負責審核叫貨單、出貨、進貨，以及新增商品與改價。' : '業務：看不到成本，可以查庫存、叫貨、送出。') + '</p>';
+      '<p class="role-note">' + (boss ? '老闆：看得到成本與毛利，負責審核叫貨單、出貨、進貨，以及新增商品、改價、設定安全庫存。' : '業務：看不到成本，可以查庫存、叫貨、送出。') + '</p>';
 
     var flow = '<div class="flow">' + FLOW.map(function (f, i) {
       return (i ? '<span class="ar">›</span>' : '') + '<span class="st' + (FLOW_BOSS.indexOf(i) >= 0 ? ' boss' : '') + (hot.indexOf(i) >= 0 ? ' hot' : '') + '">' + f + '</span>';
@@ -605,6 +613,7 @@ var App = (function () {
         '<li>選「王老闆（老闆）」，在右邊「待審核」按「核准」。<span class="muted">→ 庫存不變，因為預留早就建好了。</span></li>' +
         '<li>核准之後，在右邊「待出貨」按「出貨完成」。<span class="muted">→ 在庫和預留各扣掉 2（130 → 128），可用庫存不變，訂單變成「已出貨」。</span></li>' +
         '<li>想補貨？老闆在庫存表按「進貨」，在庫和可用都會增加；想賣新商品，按「＋新增商品」（剛建立時在庫是 0，要先進貨才能叫貨）。</li>' +
+        '<li>想看「低庫存提醒」？225/45R17 可用只有 1、安全庫存 5，所以標示「低庫存」。老闆可以按「安全庫存」調整數字；想改「低於」的算法，到「變更需求」。</li>' +
         '<li>想試「退回」或「拒絕」？它們會把預留的庫存還回去，可用數量會變多。</li>' +
         '<li>想看「兩位業務同時搶最後 1 條」？開兩個瀏覽器分頁，各扮演一位業務，同時送出 225/45R17 × 1，只有 1 人會成功。</li>' +
       '</ol>', !db.audit.length);
@@ -612,10 +621,11 @@ var App = (function () {
     var stockRows = rows.map(function (r) {
       var zero = r.available <= 0;
       return '<tr><td class="nowrap"><b>' + esc(r.spec) + '</b></td><td>' + esc(r.brand) + '<br><span class="small muted">' + esc(r.name) + '</span></td><td class="num">' + esc(r.year) + '</td>' +
-        '<td class="num">' + r.on_hand + '</td><td class="num">' + r.reserved + '</td><td class="num"><b class="' + (zero ? 'zero' : '') + '">' + r.available + '</b></td>' +
+        '<td class="num">' + r.on_hand + '</td><td class="num">' + r.reserved + '</td><td class="num"><b class="' + (zero ? 'zero' : '') + '">' + r.available + '</b>' + (lowSet[r.sku] ? '<div><span class="pill orange">低庫存</span></div>' : '') + '</td>' +
+        '<td class="num">' + (safetyOf[r.sku] || '—') + '</td>' +
         '<td class="num">' + fmtNum(r.price) + '</td>' +
         (boss ? '<td class="num">' + fmtNum(r.cost) + '</td><td class="num">' + fmtNum(r.margin) + '</td>' +
-          '<td class="nowrap"><button type="button" class="link" data-act="receive" data-sku="' + esc(r.sku) + '">進貨</button>　<button type="button" class="link" data-act="edit-price" data-sku="' + esc(r.sku) + '">改價</button></td>' :
+          '<td class="nowrap"><button type="button" class="link" data-act="receive" data-sku="' + esc(r.sku) + '">進貨</button>　<button type="button" class="link" data-act="edit-price" data-sku="' + esc(r.sku) + '">改價</button><br><button type="button" class="link" data-act="set-safety" data-sku="' + esc(r.sku) + '">安全庫存</button></td>' :
           '<td class="nowrap"><input class="qty" id="qty-' + esc(r.sku) + '" value="1" inputmode="numeric" aria-label="' + esc(r.spec) + ' 叫貨數量"> <button type="button" class="btn sm primary" data-act="add-line" data-sku="' + esc(r.sku) + '">加入叫貨</button></td>') +
         '</tr>';
     }).join('');
@@ -624,10 +634,11 @@ var App = (function () {
       '<form class="search" data-form="search"><input type="search" name="kw" value="' + esc(ui.erpQuery) + '" placeholder="輸入規格或品牌，例如 205/55R16" aria-label="查詢關鍵字"><button type="submit" class="btn primary">查詢</button>' +
       (ui.erpQuery ? '<button type="button" class="btn ghost" data-act="clear-search">看全部</button>' : '') + '</form>' +
       '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>規格</th><th>品牌／型號</th><th class="num">年份</th>' +
-      '<th class="num" title="倉庫裡實際有幾條">在庫</th><th class="num" title="已被待審核或已核准的訂單佔用">預留</th><th class="num" title="在庫 − 預留，還能賣的數量">可用</th><th class="num">售價</th>' +
+      '<th class="num" title="倉庫裡實際有幾條">在庫</th><th class="num" title="已被待審核或已核准的訂單佔用">預留</th><th class="num" title="在庫 − 預留，還能賣的數量">可用</th><th class="num" title="可用庫存低於這個數字就會提醒；— 代表不設警示">安全</th><th class="num">售價</th>' +
       (boss ? '<th class="num">成本</th><th class="num">毛利</th><th>操作</th>' : '<th>叫貨數量</th>') + '</tr></thead><tbody>' +
-      (stockRows || '<tr><td colspan="10" class="muted">查無資料</td></tr>') + '</tbody></table></div>' +
+      (stockRows || '<tr><td colspan="11" class="muted">查無資料</td></tr>') + '</tbody></table></div>' +
       '<p class="hint"><b>可用 ＝ 在庫 － 預留。</b>業務一送出叫貨單，數量就會先預留，其他業務看到的「可用」會馬上變少，不會搶到同一批庫存。</p>' +
+      '<p class="hint"><b>低庫存</b>＝可用庫存「' + lowShort + '」安全庫存（目前的規則）。' + (boss ? '按「安全庫存」可以調整數字；想改比較方式，到「變更需求」。' : '') + '</p>' +
       (boss ? '' : '<p class="hint">想試試看？數量填 0、-1 或 1.5 再按「加入叫貨」，系統會擋下來。</p>') +
       details('技術細節：這次查詢回傳的欄位', '<p class="small"><code>' + esc(rows.length ? Object.keys(rows[0]).join(', ') : Rules.SALES_FIELDS.join(', ')) + '</code>' + (boss ? '' : '（沒有 cost，業務拿不到成本）') + '</p>') +
     '</section>';
@@ -671,6 +682,12 @@ var App = (function () {
         '<section class="card"><h2>待出貨的訂單 <span class="pill teal">' + ship.length + '</span></h2>' +
           (shipHtml || '<p class="muted">目前沒有待出貨的訂單。老闆核准之後，訂單會出現在這裡。</p>') +
           '<p class="hint">按「出貨完成」時，在庫與預留會各扣掉訂購數，所以「可用」不會變；訂單變成「已出貨」，不能再退回或重複出貨。</p>' +
+        '</section>' +
+        '<section class="card"><h2>低庫存提醒 <span class="pill orange">' + lowList.length + '</span></h2>' +
+          (lowList.length ? '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>商品</th><th class="num">可用</th><th class="num">安全庫存</th></tr></thead><tbody>' + lowList.map(function (x) {
+            return '<tr><td><b>' + esc(x.spec) + '</b> <span class="small muted">' + esc(x.brand) + '</span></td><td class="num">' + x.available + '</td><td class="num">' + x.safety + '</td></tr>';
+          }).join('') + '</tbody></table></div>' : '<p class="muted">目前沒有商品低於安全庫存。</p>') +
+          '<p class="hint">目前的規則：可用庫存「' + lowShort + '」安全庫存就提醒。要改規則，請到<button type="button" class="link" data-act="go" data-to="change">變更需求</button>，系統會先列出影響範圍。</p>' +
         '</section>' +
         '<section class="card"><h2>最近的進貨單</h2>' +
           (rc ? '<div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>進貨單</th><th>時間</th><th>商品</th><th class="num">數量</th><th class="num">在庫</th></tr></thead><tbody>' + rc + '</tbody></table></div>' : '<p class="muted">還沒有進貨紀錄。在左邊庫存表按「進貨」就會留下一張進貨單。</p>') +
@@ -849,6 +866,103 @@ var App = (function () {
   }
 
   // =====================================================================
+  // ＋ 變更需求：先看影響範圍 → 寫理由 → 套用 → 自動重跑全部測試 → 存成新版本（可回復）
+  // =====================================================================
+  function chgKinds() {
+    var op = ERP.view.lowRule(db);
+    return [
+      { id: 'low-op', title: '低庫存提醒的算法', desc: '現在是可用庫存「' + Rules.LOW_OPS[op].short + '」安全庫存才提醒。可以改成另一種算法。', now: '目前：' + Rules.LOW_OPS[op].short },
+      { id: 'req-text', title: '修改某一條需求的說法', desc: '例如把「業務不可看到成本」改成「業務與倉管都不可看到成本」。只改文字，系統會列出牽動的規則與測試。', now: '' }
+    ];
+  }
+
+  function pageChange() {
+    var c = ui.chg, w = db.wb;
+    var op = ERP.view.lowRule(db), other = op === 'lt' ? 'le' : 'lt';
+    if (c.kind === 'low-op' && (!c.to || c.to === op)) c.to = other;
+    var confirmedReqs = sortedReqs().filter(function (r) { return r.status === 'confirmed'; });
+    if (c.kind === 'req-text') {
+      if (!c.req || !confirmedReqs.some(function (r) { return r.id === c.req; })) { c.req = confirmedReqs.length ? confirmedReqs[0].id : ''; c.text = ''; }
+    }
+    var reqId = c.kind === 'low-op' ? 'REQ-026' : c.req;
+    var req = reqId ? reqById(reqId) : null;
+    if (c.kind === 'req-text' && req && !c.text) c.text = req.text;
+    var ready = !!req && req.status === 'confirmed';
+    var im = reqId ? Rules.impactOf(db, reqId) : null;
+
+    var kinds = chgKinds().map(function (k) {
+      return '<button type="button" class="chg-opt' + (c.kind === k.id ? ' on' : '') + '" data-act="chg-kind" data-kind="' + k.id + '"><b>' + esc(k.title) + '</b>' +
+        '<span>' + esc(k.desc) + '</span>' + (k.now ? '<em>' + esc(k.now) + '</em>' : '') + '</button>';
+    }).join('');
+
+    var form = '';
+    if (c.kind === 'low-op') {
+      form = '<label>改成哪一種？<select data-chg="to" aria-label="新的低庫存算法">' +
+        ['lt', 'le'].map(function (k) {
+          return '<option value="' + k + '"' + (c.to === k ? ' selected' : '') + (k === op ? ' disabled' : '') + '>' + esc(Rules.LOW_OPS[k].label + '（' + Rules.LOW_OPS[k].sign + '）') + (k === op ? '　← 目前' : '') + '</option>';
+        }).join('') + '</select></label>' +
+        '<p class="hint">例：安全庫存 8、可用剛好 8。「小於」不提醒；「小於或等於」會提醒。</p>';
+    } else {
+      form = (confirmedReqs.length
+        ? '<label>要改哪一條需求？<select data-chg="req" aria-label="選擇需求">' + confirmedReqs.map(function (r) {
+            return '<option value="' + esc(r.id) + '"' + (r.id === c.req ? ' selected' : '') + '>' + esc(r.id + '　' + short(r.text, 36)) + '</option>';
+          }).join('') + '</select></label>' +
+          '<label>新的說法<textarea id="chgText" data-chg-txt="text" rows="3">' + esc(c.text) + '</textarea></label>'
+        : '<p class="muted">還沒有已確認的需求可以改。請先到「確認需求」決定。</p>');
+    }
+
+    var gate = '';
+    if (!req) gate = '<div class="note orange">還沒有這條需求（' + esc(reqId || '—') + '）。請先完成「AI 問答」，再到「確認需求」決定。<button type="button" class="link" data-act="go" data-to="interview">去 AI 問答</button></div>';
+    else if (req.status !== 'confirmed') gate = '<div class="note orange"><b>' + esc(req.id) + '</b> 目前是「' + esc(Rules.REQ_STATUS[req.status]) + '」，還沒有確認。要先確認才能變更。<button type="button" class="link" data-act="go" data-to="confirm">去確認需求</button></div>';
+
+    var impact = '';
+    if (im && im.req) {
+      var testNames = im.tests.map(function (id) { var tc = Tests.byId(id); return '<li>' + esc(tc ? tc.title : id) + ' <span class="small muted idtag">' + esc(id) + '</span></li>'; }).join('');
+      impact = '<div class="impact">' +
+        '<div class="imp-row"><b>要改的需求</b><div><span class="idtag">' + esc(im.req.id) + '</span> ' + esc(im.req.text) + '</div></div>' +
+        '<div class="imp-row"><b>會牽動的規則（' + im.rules.length + '）</b><div>' + (im.rules.length ? '<ul class="plain-list">' + im.rules.map(function (r) { return '<li>' + esc(r.title) + ' <span class="small muted idtag">' + esc(r.id) + '</span></li>'; }).join('') + '</ul>' : '<span class="muted">沒有對應的規則</span>') +
+          (im.fromTemplates ? '<div class="small muted">（還沒建立規則，這裡先用預設的規則清單）</div>' : '') + '</div></div>' +
+        '<div class="imp-row"><b>一定要重跑的驗收案例（' + im.tests.length + '）</b><div>' + (im.tests.length ? '<ul class="plain-list">' + testNames + '</ul>' : '<span class="muted">這條需求還沒有驗收案例</span>') +
+          '<div class="small muted">另外，其他所有舊案例也會一起重跑（回歸），共 ' + Tests.cases.length + ' 項。</div></div></div>' +
+        '<div class="imp-row"><b>同一條規則還管到的需求</b><div>' + (im.otherReqs.length ? im.otherReqs.map(function (id) { var q = reqById(id); return '<div><span class="idtag">' + esc(id) + '</span> ' + esc(q ? short(q.text, 40) : '') + '</div>'; }).join('') : '<span class="muted">沒有</span>') + '</div></div>' +
+        '<div class="imp-row"><b>已存的版本</b><div>' + (im.versions.length ? '以前的版本 ' + im.versions.map(function (v) { return '<span class="mono">' + esc(v) + '</span>'; }).join('、') + ' 不會被改動；改完會存成新的版本。' : '還沒有存過版本；改完會存成第一個版本。') + '</div></div>' +
+        details('技術細節：會檢查的程式', '<p class="small"><code>' + esc(im.code.join('、') || '（無）') + '</code></p>') +
+      '</div>';
+    }
+
+    var canGo = ready && (c.kind === 'low-op' || (c.text && req && c.text.trim() !== req.text));
+    var steps = '<section class="card"><h2>1　你想改什麼？</h2><div class="chg-opts">' + kinds + '</div></section>' +
+      '<section class="card"><h2>2　改成什麼？</h2>' + form + gate + '</section>' +
+      '<section class="card"><h2>3　這樣改，會牽動哪些地方</h2>' + (impact || '<p class="muted">選好要改的需求，這裡會列出牽動的規則與測試。</p>') + '</section>' +
+      '<section class="card"><h2>4　為什麼要改？確認後套用</h2>' +
+        '<label>理由（一定要寫，會留在變更紀錄裡）<textarea id="chgReason" data-chg-txt="reason" rows="2" placeholder="例如：剛好用完安全庫存，也希望收到提醒">' + esc(c.reason) + '</textarea></label>' +
+        '<button type="button" class="btn primary big" data-act="chg-apply"' + (canGo ? '' : ' disabled') + '>確認，套用變更並重跑全部測試</button>' +
+        '<p class="hint">按下去以後：先改 → 自動重跑 ' + Tests.cases.length + ' 項驗收測試 → 全部通過就存成新版本；有沒通過的就不存，並提醒你可以回復。</p></section>';
+
+    var logRows = w.changes.slice().reverse().map(function (ch) {
+      var newer = w.changes.some(function (x) { return x.kind === ch.kind && x.req_id === ch.req_id && x.status !== 'reverted' && x.id > ch.id; });
+      var st = ch.status === 'verified' ? '<span class="pill teal">已套用，測試通過</span>' : ch.status === 'failed' ? '<span class="pill fail">測試沒通過</span>' : ch.status === 'reverted' ? '<span class="pill">已回復</span>' : '<span class="pill orange">套用中</span>';
+      var reg = ch.regression ? ch.regression.pass + '／' + ch.regression.total : '—';
+      return '<tr><td class="mono nowrap"><b>' + esc(ch.id) + '</b></td><td class="nowrap">' + fmtTime(ch.at) + '</td>' +
+        '<td><b>' + esc(ch.title) + '</b>' + (ch.kind === 'req-text' ? '<div class="small muted">原本：' + esc(short(ch.from, 40)) + '</div><div class="small">改成：' + esc(short(ch.to, 40)) + '</div>' : '') + '<div class="small muted">需求 ' + esc(ch.req_id) + '</div></td>' +
+        '<td class="small">' + esc(ch.reason) + (ch.status === 'reverted' ? '<div class="muted">回復理由：' + esc(ch.revert_reason) + '</div>' : '') + '</td>' +
+        '<td class="num">' + reg + '</td><td class="mono">' + esc(ch.version || '—') + (ch.revert_version ? '<div class="small muted">回復後 ' + esc(ch.revert_version) + '</div>' : '') + '</td><td>' + st + '</td>' +
+        '<td>' + (ch.status !== 'reverted' && !newer ? '<button type="button" class="btn sm" data-act="chg-revert" data-id="' + esc(ch.id) + '">回復這次變更</button>' : '') + '</td></tr>';
+    }).join('');
+    var logCard = '<section class="card"><h2>變更紀錄 <span class="muted small">（每次變更都留下：改了什麼、為什麼、牽動什麼、測試結果、存成哪個版本）</span></h2>' +
+      (logRows ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>編號</th><th>時間</th><th>改了什麼</th><th>理由</th><th class="num">測試</th><th>版本</th><th>狀態</th><th></th></tr></thead><tbody>' + logRows + '</tbody></table></div>' : '<p class="muted">還沒有變更。</p>') +
+      '</section>';
+
+    return head('＋　變更需求', '規則要改的時候，<b>先看會牽動哪些地方</b>，寫下理由才改；改完系統會自動重跑全部驗收測試，沒問題就存成新版本。想反悔還可以回復。') + steps + logCard;
+  }
+
+  // 變更或回復之後：用「目前的規則」重跑全部驗收測試，再交給 Store 記錄、決定要不要存版本
+  function finishChange(id, mode) {
+    var results = Tests.runAll({ settings: db.settings });
+    act(function (cur) { return Store.wb.finishChange(cur, id, results, mode); });
+  }
+
+  // =====================================================================
   // 示範導覽（8 分鐘）
   // =====================================================================
   function fmtClock(s) { var a = Math.abs(s); return (s < 0 ? '-' : '') + Math.floor(a / 60) + ':' + two(a % 60); }
@@ -876,7 +990,7 @@ var App = (function () {
   // =====================================================================
   // 主畫面
   // =====================================================================
-  var PAGES = { a: pageA, interview: pageInterview, confirm: pageConfirm, rules: pageRules, devpack: pageDevpack, erp: pageERP, verify: pageVerify, versions: pageVersions };
+  var PAGES = { a: pageA, interview: pageInterview, confirm: pageConfirm, rules: pageRules, devpack: pageDevpack, erp: pageERP, verify: pageVerify, versions: pageVersions, change: pageChange };
 
   function currentRoute() {
     var id = (location.hash || '').replace(/^#\/?/, '');
@@ -894,14 +1008,15 @@ var App = (function () {
     if (draftBox) ui.draft = draftBox.value;
     var r = currentRoute();
     ui.route = r.id;
-    var done = ROUTES.filter(function (x) { return navDone(x.id); }).length;
+    var main = ROUTES.filter(function (x) { return !x.opt; });
+    var done = main.filter(function (x) { return navDone(x.id); }).length;
     $('#nav').innerHTML = ROUTES.map(function (x) {
       return '<a href="#/' + x.id + '" class="' + (x.id === r.id ? 'active' : '') + '"' + (x.id === r.id ? ' aria-current="page"' : '') + '>' +
         '<span class="no">' + x.no + '</span><span class="lb">' + esc(x.nav) + '</span><span class="ck">' + (navDone(x.id) ? '✔' : '') + '</span></a>';
     }).join('');
     $('#crumb').textContent = '專案：' + db.wb.project.name + '　／　' + r.no + ' ' + r.title;
     $('#verBadge').textContent = db.wb.versions.length ? db.meta.version : '尚未存版本';
-    $('#sideFoot').innerHTML = '<div class="side-progress"><div class="bar" style="width:' + Math.round(done / ROUTES.length * 100) + '%"></div></div>已完成 ' + done + '／' + ROUTES.length + ' 步<br>' +
+    $('#sideFoot').innerHTML = '<div class="side-progress"><div class="bar" style="width:' + Math.round(done / main.length * 100) + '%"></div></div>已完成 ' + done + '／' + main.length + ' 步<br>' +
       (Store.persistent() ? '資料存在這台電腦的瀏覽器' : '⚠ 瀏覽器不允許儲存，關閉後資料會消失') +
       '<br><span class="build" title="如果畫面和說明不一樣，請按 Ctrl + F5 重新載入">程式版本 ' + esc(SEED.meta.build) + '</span>';
     $('#main').innerHTML = nextBar() + PAGES[r.id]();
@@ -1128,6 +1243,44 @@ var App = (function () {
         }
       });
     },
+    'set-safety': function (el) {
+      var sku = el.dataset.sku;
+      var p = db.products.filter(function (x) { return x.sku === sku; })[0];
+      if (!p) return;
+      modal({
+        title: '安全庫存：' + p.spec + ' ' + p.brand, ok: '儲存',
+        html: '<label>安全庫存（條）<input id="mSafety" value="' + esc(p.safety || 0) + '" inputmode="numeric"></label>' +
+          '<p class="hint">可用庫存低於這個數字，就會標示「低庫存」。填 0 代表不設警示。只能填 0 或正整數。</p>',
+        onOk: function (w) {
+          var v = w.querySelector('#mSafety').value;
+          act(function (cur) { return ERP.setSafetyStock(cur, ui.erpUser, sku, v); });
+        }
+      });
+    },
+    // 變更需求
+    'chg-kind': function (el) { ui.chg.kind = el.dataset.kind; ui.chg.to = ''; ui.chg.req = ''; ui.chg.text = ''; render(); },
+    'chg-apply': function () {
+      var c = ui.chg;
+      var spec = { kind: c.kind, req_id: c.kind === 'low-op' ? 'REQ-026' : c.req, to: c.kind === 'low-op' ? c.to : c.text, reason: c.reason };
+      var res = act(function (cur) { return Store.wb.applyChange(cur, spec); }, { silent: true });
+      if (!res.ok) { toast(res.message, false); return; }
+      c.reason = ''; c.text = '';
+      finishChange(res.data.id, 'apply');
+    },
+    'chg-revert': function (el) {
+      var id = el.dataset.id;
+      modal({
+        title: '回復 ' + id, ok: '回復',
+        html: '<label>為什麼要回復？<input id="mReason" placeholder="例如：試用後發現太常提醒"></label>' +
+          '<p class="hint">回復會把這次的修改改回去，並自動重跑全部驗收測試、存成新版本。原本的變更紀錄會保留。</p>',
+        onOk: function (w) {
+          var why = w.querySelector('#mReason').value;
+          var res = act(function (cur) { return Store.wb.revertChange(cur, id, why); }, { silent: true });
+          if (!res.ok) { toast(res.message, false); return; }
+          finishChange(id, 'revert');
+        }
+      });
+    },
     'reject-order': function (el) {
       var id = el.dataset.id;
       modal({
@@ -1165,6 +1318,10 @@ var App = (function () {
     } else if (t.dataset.cust) {
       var oid = t.dataset.cust, cv = t.value;
       act(function (cur) { return ERP.setCustomer(cur, ui.erpUser, oid, cv); });
+    } else if (t.dataset.chg) {
+      ui.chg[t.dataset.chg] = t.value;
+      if (t.dataset.chg === 'req') ui.chg.text = '';
+      render();
     } else if (t.dataset.change === 'add-source') {
       var files = Array.prototype.slice.call(t.files || []);
       files.forEach(function (file) {
@@ -1201,6 +1358,7 @@ var App = (function () {
     });
     document.addEventListener('input', function (e) {
       if (e.target && e.target.id === 'chatMsg') fitChat(e.target);
+      if (e.target && e.target.dataset && e.target.dataset.chgTxt) { ui.chg[e.target.dataset.chgTxt] = e.target.value; var go = document.querySelector('[data-act="chg-apply"]'); if (go && e.target.dataset.chgTxt === 'text') go.disabled = !(e.target.value.trim() && (!reqById(ui.chg.req) || e.target.value.trim() !== reqById(ui.chg.req).text)); }
     });
     window.addEventListener('hashchange', function () { render(); window.scrollTo(0, 0); });
     // 其他分頁改了資料（例如另一位老闆核准）→ 重新讀取
