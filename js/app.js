@@ -643,7 +643,7 @@ var App = (function () {
           return '<button type="button" role="tab" class="tab ' + (n === ui.devTab ? 'on' : '') + '" data-act="dev-tab" data-tab="' + esc(n) + '">' + esc(DEV_NAMES[n] || n) + '</button>';
         }).join('') + '</div>' +
         '<pre class="code">' + esc(pack.files[ui.devTab]) + '</pre>' +
-        '<div class="row-actions mt"><button type="button" class="btn sm" data-act="dev-copy">只複製這一份</button><button type="button" class="btn sm ghost" data-act="dev-download">只下載這一份（' + esc(ui.devTab) + '）</button></div>');
+        '<div class="row-actions mt"><button type="button" class="btn sm" data-act="dev-copy">只複製這一份</button><button type="button" class="btn sm ghost" data-act="dev-download">只下載這一份（' + esc(ui.devTab) + '）</button></div>', ui.devOpen);
   }
 
   function allDevText() {
@@ -858,7 +858,7 @@ var App = (function () {
     }).join('');
 
     return head('6　試用 ERP（輪胎批發）', '用不同角色登入，看看每個角色看得到什麼、能做什麼，以及庫存怎麼變。', '') + roles + flow + tryit +
-      '<div class="erp-grid' + (boss ? ' wide' : '') + '"><div>' + stock + '</div><div>' + right + '</div></div>' +
+      '<div class="erp-grid' + (boss || sales ? ' wide' : '') + '"><div>' + stock + '</div><div>' + right + '</div></div>' +
       '<section class="card"><h2>操作紀錄 <span class="muted small">（最近 15 筆，共 ' + db.audit.length + ' 筆；每個動作都會留下紀錄，被擋下的也會）</span></h2>' +
         '<p class="small ' + (inv.length ? 'inv-bad' : 'inv-ok') + '">' + (inv.length ? '✘ 庫存對不起來：' + esc(inv.join('；')) : '✔ 庫存檢查正常：每個品項的預留數量，剛好等於待審核與已核准訂單的數量加總') + '</p>' +
         (audits ? '<div class="tbl-wrap"><table class="tbl compact audit-log"><thead><tr><th>時間</th><th>誰</th><th>做了什麼</th><th>結果</th></tr></thead><tbody>' + audits + '</tbody></table></div>' : '<p class="muted">還沒有紀錄。</p>') +
@@ -1353,7 +1353,7 @@ var App = (function () {
     },
     'rule-edit': function (el) { ui.ruleEdit = ui.ruleEdit === el.dataset.id ? '' : el.dataset.id; render(); },
     'gen-devpack': function () { act(function (cur) { return Store.wb.genDevpack(cur); }); },
-    'dev-tab': function (el) { ui.devTab = el.dataset.tab; render(); },
+    'dev-tab': function (el) { ui.devTab = el.dataset.tab; ui.devOpen = true; render(); },
     'dev-copy': function () { copyText(Rules.devpack(db).files[ui.devTab]); },
     'dev-copy-all': function () { copyText(allDevText()); },
     'dev-download': function () { download(ui.devTab, Rules.devpack(db).files[ui.devTab]); },
